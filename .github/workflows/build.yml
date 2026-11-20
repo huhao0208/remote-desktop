@@ -82,13 +82,14 @@ jobs:
       - name: Build standalone binaries (server + agent)
         shell: bash
         run: |
-          # --add-data 的源路径相对 spec 文件所在目录（--specpath），必须给绝对路径，
-          # 否则会去找 build_tmp/srv2/control.html 而失败
+          # --add-data 的相对路径是相对 spec 文件目录解析的，所以 spec 必须放在
+          # 仓库根（.），否则会去找 build_tmp/srv2/control.html 而失败。
+          # 不能改用 $PWD：Windows 上 Git Bash 的 $PWD 是 /d/a/... 形式，Python 不认。
           pyinstaller --onefile --name uu-server \
             --collect-submodules uvicorn \
             --hidden-import websockets \
-            --add-data "$PWD/srv2/control.html${{ matrix.sep }}." \
-            --distpath dist --workpath build_tmp --specpath build_tmp \
+            --add-data "srv2/control.html${{ matrix.sep }}." \
+            --distpath dist --workpath build_tmp --specpath . \
             srv2/server.py
           pyinstaller --onefile --name uu-agent \
             --collect-submodules mss \

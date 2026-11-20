@@ -63,3 +63,6 @@ client-mobile/ios/**/xcuserdata/
 build_tmp*/
 dist/
 data-local/
+
+# PyInstaller spec（--specpath . 会在仓库根生成）
+*.spec
