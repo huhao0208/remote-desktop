@@ -176,7 +176,7 @@ class RoomConfig {
   }
 }
 
-/// `agent.hello`（见 docs/media-protocol.md §1）。
+/// `agent.hello`（见 docs/media-protocol.md §1 / v2 §1）。
 class AgentHello {
   const AgentHello({
     required this.name,
@@ -185,6 +185,7 @@ class AgentHello {
     required this.height,
     required this.media,
     required this.fps,
+    this.audio = false,
   });
 
   final String name;
@@ -195,6 +196,9 @@ class AgentHello {
   /// `webrtc` | `jpeg`；老 Agent 不发该字段时按 `jpeg` 处理（向后兼容）。
   final String media;
   final int fps;
+
+  /// 协议 v2 §1：本会话是否会有音频轨。老 Agent 不发 → false。
+  final bool audio;
 
   bool get isWebRtc => media.toLowerCase() == 'webrtc';
 
@@ -211,6 +215,7 @@ class AgentHello {
       height: _asInt(s['h']),
       media: media.isEmpty ? 'jpeg' : media,
       fps: _asInt(st['fps'], 30),
+      audio: _asBool(json['audio']),
     );
   }
 }

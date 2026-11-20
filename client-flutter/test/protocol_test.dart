@@ -34,6 +34,18 @@ void main() {
       expect(hello.isWebRtc, isTrue);
       expect(hello.media, 'webrtc');
     });
+
+    test('v2 audio 能力位：true/1 都认，缺省为 false（老 Agent）', () {
+      AgentHello parse(Object? audio) => AgentHello.fromJson(<String, dynamic>{
+            'media': 'webrtc',
+            'audio': audio,
+          });
+      expect(parse(true).audio, isTrue);
+      expect(parse(1).audio, isTrue);
+      expect(parse(false).audio, isFalse);
+      expect(parse(null).audio, isFalse);
+      expect(AgentHello.fromJson(<String, dynamic>{'media': 'webrtc'}).audio, isFalse);
+    });
   });
 
   group('device.list 解析', () {

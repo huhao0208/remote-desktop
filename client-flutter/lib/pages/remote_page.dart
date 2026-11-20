@@ -67,6 +67,10 @@ class _RemotePageState extends State<RemotePage> {
   /// WebRTC 的 getStats() 结果（JPEG 通路恒为空，HUD 走 [_fps]）。
   TransportStats _stats = const TransportStats();
 
+  /// 音频（协议 v2 §1）：是否已收到远端轨、是否本地静音。
+  bool _audioAvailable = false;
+  bool _audioMuted = false;
+
   final FocusNode _focusNode = FocusNode(debugLabel: 'remote-keyboard');
   final Set<String> _heldMods = <String>{};
 
@@ -158,6 +162,8 @@ class _RemotePageState extends State<RemotePage> {
     _statsListenable?.removeListener(_onStats);
     _statsListenable = null;
     _stats = const TransportStats();
+    _audioAvailable = false;
+    _audioMuted = false;
     await _transport?.dispose();
     _transport = null;
     await _signaling?.close();
@@ -211,6 +217,7 @@ class _RemotePageState extends State<RemotePage> {
     final AgentHello? previous = _hello;
     final bool needNewTransport = previous == null ||
         previous.isWebRtc != hello.isWebRtc ||
+        previous.audio != hello.audio ||
         previous.width != hello.width ||
         previous.height != hello.height;
 
@@ -230,6 +237,9 @@ class _RemotePageState extends State<RemotePage> {
     _frameSub = null;
     _statsListenable?.removeListener(_onStats);
     _statsListenable = null;
+    // 新通路 = 新会话，音频状态一并归零（否则 UI 显示静音但新媒体其实在放）
+    _audioAvailable = false;
+    _audioMuted = false;
     final MediaTransport? old = _transport;
     _transport = null;
     await old?.dispose();
@@ -360,6 +370,11 @@ class _RemotePageState extends State<RemotePage> {
 
   void _onTick() {
     if (!mounted) return;
+    // 音频轨到达是异步的（onTrack），跟 fps 一样按秒级刷新即可
+    final bool audioReady = _transport?.hasAudio ?? false;
+    if (audioReady != _audioAvailable && mounted) {
+      setState(() => _audioAvailable = audioReady);
+    }
     final DateTime? last = _lastFrameAt;
     // 首帧未到时由占位视图提示「等待画面」，这里只处理「曾经有帧、现在断了」
     final bool stalled = _transport != null &&
@@ -414,6 +429,13 @@ class _RemotePageState extends State<RemotePage> {
     if (!_fullscreen) return;
     if (!_chromeVisible) setState(() => _chromeVisible = true);
     _scheduleChromeHide();
+  }
+
+  /// 本地静音开关：只调本机音量，不发任何信令（协议 v2 §1）。
+  void _toggleAudio() {
+    final bool next = !_audioMuted;
+    setState(() => _audioMuted = next);
+    _transport?.setAudioMuted(next);
   }
 
   Future<void> _sendClipboardText() async {
@@ -707,6 +729,13 @@ class _RemotePageState extends State<RemotePage> {
               ? AppColors.videoMuted
               : (fps >= 24 ? AppColors.accentHover : AppColors.warn),
         ),
+        // 只有 hello.audio 为真且真的收到音频轨才显示（缺音频不影响视频）
+        if ((hello?.audio ?? false) && _audioAvailable)
+          HudChip(
+            text: _audioMuted ? '静音' : '有声',
+            icon: _audioMuted ? Icons.volume_off : Icons.volume_up,
+            color: _audioMuted ? AppColors.videoMuted : AppColors.accentHover,
+          ),
         const SizedBox(width: AppSpace.xs),
       ];
     }
@@ -797,6 +826,13 @@ class _RemotePageState extends State<RemotePage> {
                     active: _keyboardLock,
                     onPressed: () => setState(() => _keyboardLock = !_keyboardLock),
                   ),
+                  if ((_hello?.audio ?? false) && _audioAvailable)
+                    ToolButton(
+                      icon: _audioMuted ? Icons.volume_off : Icons.volume_up,
+                      tooltip: _audioMuted ? '已静音（点击开启被控端声音）' : '静音（仅本机，不通知被控端）',
+                      active: !_audioMuted,
+                      onPressed: _toggleAudio,
+                    ),
                   ToolButton(
                     icon: Icons.content_paste,
                     tooltip: '粘贴本机剪贴板（⌘/Ctrl+V）',

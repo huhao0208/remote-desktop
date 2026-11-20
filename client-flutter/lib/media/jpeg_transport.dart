@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 
 import '../core/models.dart';
@@ -16,7 +15,7 @@ import 'media_transport.dart';
 /// ⚠️ 兜底方案：`Image.memory` 每帧都会走一次解码+上传纹理，1080p@30 时 CPU/GPU
 /// 开销很大，且会有 1 帧闪烁。`agent.hello.media == "webrtc"` 时走
 /// [WebRtcTransport]（原生纹理），只有 WebRTC 不可用/断链才回落到这里。
-class JpegTransport implements MediaTransport {
+class JpegTransport extends MediaTransport {
   final ValueNotifier<Uint8List?> _latest = ValueNotifier<Uint8List?>(null);
   final StreamController<FramePacket> _frames = StreamController<FramePacket>.broadcast();
 
@@ -32,10 +31,6 @@ class JpegTransport implements MediaTransport {
 
   @override
   Stream<FramePacket> get frames => _frames.stream;
-
-  /// JPEG 没有 `getStats()`：帧数由页面自己数，这里保持缺省。
-  @override
-  ValueListenable<TransportStats>? get stats => null;
 
   @override
   Future<void> start({

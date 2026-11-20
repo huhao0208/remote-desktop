@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -32,7 +33,7 @@ typedef WebRtcFallback = void Function(String reason);
 /// RTP 参数；③ 画面按 1:1 像素渲染（`BoxFit.contain`，不超采样）。
 ///
 /// v2 能力（音频 / 剪贴板 / 多屏 / 修饰键）只留挂点，见文件末尾 TODO。
-class WebRtcTransport implements MediaTransport {
+class WebRtcTransport extends MediaTransport {
   final StreamController<FramePacket> _frames = StreamController<FramePacket>.broadcast();
   final ValueNotifier<TransportStats> _stats =
       ValueNotifier<TransportStats>(const TransportStats());
@@ -42,6 +43,11 @@ class WebRtcTransport implements MediaTransport {
   SignalingClient? _signaling;
   StreamSubscription<Map<String, dynamic>>? _signalSub;
   Timer? _statsTimer;
+
+  /// 远端音频轨（协议 v2 §1）。插件在原生层直接把远端音频送到系统音频设备，
+  /// **不需要 renderer**；这里保留引用只为了本地调音量（静音）。
+  MediaStreamTrack? _audioTrack;
+  bool _audioMuted = false;
 
   /// 候选可能早于 answer 到达，先缓存再补投（协议 §2.3）。
   final List<RTCIceCandidate> _pendingCandidates = <RTCIceCandidate>[];
@@ -78,6 +84,22 @@ class WebRtcTransport implements MediaTransport {
   RTCVideoRenderer? get renderer => _renderer;
 
   @override
+  bool get hasAudio => _audioTrack != null;
+
+  @override
+  Future<void> setAudioMuted(bool muted) async {
+    _audioMuted = muted;
+    final MediaStreamTrack? track = _audioTrack;
+    if (track == null) return;
+    try {
+      // 远端轨调音量 = 纯本地行为，不产生任何信令（协议 v2 §1「不通知 Agent」）
+      await Helper.setVolume(muted ? 0.0 : 1.0, track);
+    } catch (e) {
+      debugPrint('[webrtc] 本地静音失败：$e');
+    }
+  }
+
+  @override
   Future<void> start({
     required AgentHello hello,
     required RoomConfig room,
@@ -90,14 +112,14 @@ class WebRtcTransport implements MediaTransport {
     // 建 PC / 加 transceiver / setLocal 任何一步失败都**不往外抛**：
     // 统一记成 fallbackReason，页面 start() 返回后补查并切 JPEG（协议 §5）。
     try {
-      await _openSession(room);
+      await _openSession(room, withAudio: hello.audio);
     } catch (e, stack) {
       debugPrint('[webrtc] 初始化失败：$e\n$stack');
       _notifyFallback('初始化失败：$e');
     }
   }
 
-  Future<void> _openSession(RoomConfig room) async {
+  Future<void> _openSession(RoomConfig room, {required bool withAudio}) async {
     final RTCVideoRenderer renderer = RTCVideoRenderer();
     await renderer.initialize();
     _renderer = renderer;
@@ -116,6 +138,17 @@ class WebRtcTransport implements MediaTransport {
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
     await _preferMaintainResolution(transceiver);
+
+    // 协议 v2 §1：hello 声明有音频才加 audio m-line。
+    // Agent 侧是「offer 里有 m=audio 才 addTrack」，所以这条 m-line 决定了能否收到声音；
+    // 老 Agent（hello 无 audio）完全不受影响。
+    if (withAudio) {
+      await _prepareAudioOutput();
+      await pc.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+      );
+    }
 
     pc.onTrack = (RTCTrackEvent event) {
       // 回调是原生的同步回调：不能抛，异步部分全部收进 _attachRemoteTrack
@@ -164,6 +197,41 @@ class WebRtcTransport implements MediaTransport {
     });
   }
 
+  // ------------------------------------------------------------ 音频（协议 v2 §1）
+
+  /// 播放侧准备：远端音频由插件在原生层直接送到系统音频设备，Dart 侧不建 renderer。
+  ///
+  /// iOS 必须显式开好 `AVAudioSession`（`playback` 类别），否则「只收不发」的会话
+  /// 没有会话激活、能收到 RTP 但听不到声音。Android/macOS/Linux/Windows 不需要。
+  Future<void> _prepareAudioOutput() async {
+    if (!Platform.isIOS) return;
+    try {
+      await Helper.setAppleAudioConfiguration(AppleAudioConfiguration(
+        appleAudioCategory: AppleAudioCategory.playback,
+        appleAudioCategoryOptions: <AppleAudioCategoryOption>{
+          AppleAudioCategoryOption.allowBluetooth,
+          AppleAudioCategoryOption.allowAirPlay,
+        },
+      ));
+      await Helper.ensureAudioSession();
+    } catch (e) {
+      // 配不上也能继续收流，只是可能没声音，不要让整条通路失败
+      debugPrint('[webrtc] iOS 音频会话配置失败（忽略）：$e');
+    }
+  }
+
+  Future<void> _attachRemoteAudio(MediaStreamTrack track) async {
+    try {
+      _audioTrack = track;
+      // 断线重连/换轨时保持用户选择的静音状态
+      await Helper.setVolume(_audioMuted ? 0.0 : 1.0, track);
+      debugPrint('[webrtc] 收到远端音频轨 ${track.id}');
+    } catch (e) {
+      // 音频失败**不**触发 fallback：视频照常，用户只是听不到声音
+      debugPrint('[webrtc] 挂载远端音频失败：$e');
+    }
+  }
+
   // ------------------------------------------------------------ 信令
 
   /// 把远端轨挂到渲染器。
@@ -174,8 +242,7 @@ class WebRtcTransport implements MediaTransport {
   Future<void> _attachRemoteTrack(RTCTrackEvent event, RTCVideoRenderer renderer) async {
     try {
       if (event.track.kind == 'audio') {
-        // TODO(v2-audio): 协议 v2 §1 —— 挂到页面隐藏的音频元素/播放器，静音只改
-        // 本地音量，不通知 Agent。v1 不实现，收到 audio 轨直接忽略。
+        await _attachRemoteAudio(event.track);
         return;
       }
       MediaStream? stream = event.streams.isNotEmpty ? event.streams.first : null;
@@ -385,6 +452,7 @@ class WebRtcTransport implements MediaTransport {
     await _signalSub?.cancel();
     _signalSub = null;
     _pendingCandidates.clear();
+    _audioTrack = null; // 轨由 pc.close() 统一回收，这里只松引用
     _stats.value = const TransportStats();
     _stats.dispose();
 
@@ -409,14 +477,14 @@ class WebRtcTransport implements MediaTransport {
 }
 
 // ---------------------------------------------------------------------------
-// v2 能力挂点（协议 v2，FROZEN；v1 只留接口，不实现）
+// v2 能力挂点（协议 v2，FROZEN）
 //
-// | 能力     | 控制端要做的事                                              |
-// |----------|-------------------------------------------------------------|
-// | 音频     | onTrack 里 kind=='audio' → 播放器；本地静音，不发消息      |
-// | 剪贴板   | {p:'clip',dir:'up'|'down',text} + {p:'clip.sync'}，md5 去重 |
-// | 多屏     | {p:'screens'} / {p:'screen.select'}，Agent 重协商时答 offer |
-// | 修饰键   | 已在远控页实现 v1 版 keydown/keyup；v2 要求 blur 时全释放  |
+// | 能力     | 状态                                                          |
+// |----------|---------------------------------------------------------------|
+// | 音频     | ✅ 已实现：hello.audio → audio recvonly + 原生播放 + 本地静音 |
+// | 剪贴板   | TODO：{p:'clip',dir:'up'|'down',text} + {p:'clip.sync'}，md5 去重 |
+// | 多屏     | TODO：{p:'screens'} / {p:'screen.select'}，Agent 重协商时答 offer |
+// | 修饰键   | 远控页已有 v1 版 keydown/keyup；v2 要求 blur 时全释放          |
 //
 // 以上消息都复用现有 WS，服务端零改动。
 // ---------------------------------------------------------------------------

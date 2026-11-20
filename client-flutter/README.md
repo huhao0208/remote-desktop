@@ -27,10 +27,11 @@ Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`cl
 | WebRTC `rtc.offer/answer/ice/close` | ✅ 见 `lib/media/webrtc_transport.dart` |
 | **桌面端内置被控端（`uu-agent` 子进程）** | ✅ 见第 6 节（产物需 release 流程随包拷贝） |
 | 移动端被控 | ❌ 不做（系统限制），移动端只做控制端 |
-| 关机 `shutdown` UI、文件传输、剪贴板、音频、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
+| **音频（收被控端声音 + 本地静音）** | ✅ 协议 v2 §1，见第 5.5 节 |
+| 关机 `shutdown` UI、文件传输、剪贴板、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
 
 骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze --fatal-infos` → **No issues found**，
-`flutter test` → 39 passed，`flutter build bundle`（Dart 全量编译）通过。
+`flutter test` → 42 passed，`flutter build bundle`（Dart 全量编译）通过。
 
 ---
 
@@ -241,7 +242,7 @@ HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
 | 场景 | 键 | 值 |
 |---|---|---|
 | 连内网被控端（iOS 14+ 局域网访问弹窗） | `NSLocalNetworkUsageDescription` | 如「需要访问局域网内的被控设备以建立直连」 |
-| v2 音频（收被控端声音，**只播放不采集**） | 无需权限 | 仅 `AVAudioSession` 播放类别，`flutter_webrtc` 自己配 |
+| 收被控端声音（**只播放不采集**） | 无需权限 | 代码里用 `Helper.setAppleAudioConfiguration(playback)` + `ensureAudioSession()` 开好播放会话，见 5.5 |
 | v2 若做「本机麦克风上行」 | `NSMicrophoneUsageDescription` | 说明文案，否则启动即崩 |
 
 macOS：沙盒必须开 `com.apple.security.network.client`（已在
@@ -251,7 +252,18 @@ macOS：沙盒必须开 `com.apple.security.network.client`（已在
 平台最低版本要求（`flutter_webrtc` 1.6.3）：iOS ≥ 13.0、macOS ≥ 10.15 —— 本工程
 分别是 15.0 / 12.0，无需改动。
 
-### 5.5 输入与坐标（不变式）
+### 5.5 音频（协议 v2 §1，已接入）
+
+| 项 | 行为 |
+|---|---|
+| 何时有声音 | `agent.hello.audio == true` 时客户端在 offer 里加一条 `audio recvonly` m-line；Agent 侧是「offer 里有 m=audio 才 addTrack」，所以老 Agent（不发 `audio`）完全不受影响，也不会多出 m-line |
+| 谁负责播放 | **插件原生层**：libwebrtc 收到远端音频轨后直接送到系统音频设备，Dart 侧不建 renderer、不放 `RTCVideoView`。客户端只保留轨道引用用于调音量 |
+| 本地静音 | `Helper.setVolume(0/1, track)`，**纯本地、不发任何信令**（协议明确「不通知 Agent，省一次往返」）；静音状态在换轨/重连后保持 |
+| HUD | 只有 `hello.audio == true` **且真的收到音频轨** 才显示 `音量图标 + 有声/静音`；点工具栏的扬声器按钮切换。缺音频**不会**触发 JPEG 回落（视频照常） |
+| iOS | 必须开 `AVAudioSession`：`AppleAudioCategory.playback`（不采集，所以不需要麦克风权限）+ `Helper.ensureAudioSession()`；Android/macOS/Linux/Windows 无需配置 |
+| 音频统计 | v2 的 `stats` 消息里 `audio:true` 未实现（控制端本地用 `<audio>` 播放没有可读指标）；需要时按 `inbound-rtp(kind=audio)` 再补 |
+
+### 5.6 输入与坐标（不变式）
 
 `RTCVideoView` 挂在远控页 `_stage` 那层 `Listener` 之下，与 JPEG 的 `Image.memory`
 共用同一套 `localPosition → 0..1` 归一化（`BoxFit.contain` 的留白偏移也一并算掉）。
@@ -259,12 +271,12 @@ macOS：沙盒必须开 `com.apple.security.network.client`（已在
 
 ---
 
-## 5.5 本地验证结果（Flutter 3.50.1 / macOS arm64）
+## 5.7 本地验证结果（Flutter 3.50.1 / macOS arm64）
 
 ```
 $ flutter pub get                     → +9 dependencies（flutter_webrtc 1.6.3 / dart_webrtc 1.8.2 ...）
 $ flutter analyze --fatal-infos       → No issues found!
-$ flutter test                        → 00:12 +39: All tests passed!
+$ flutter test                        → 00:08 +42: All tests passed!
 $ flutter build bundle                → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
 ```
 
@@ -350,8 +362,9 @@ Agent 的 stdout/stderr 按行转发到 `debugPrint`，前缀 `[uu-agent]` / `[u
    长按 550ms=右键」实现，阈值未实测调优。
 8. **Android 9+ 不支持 `http://` 服务端**：默认未开 `usesCleartextTraffic`，请用 `https://`；
    若内网必须走明文，需在 `AndroidManifest.xml` 加网络明文策略（不推荐）。
-9. **v2 能力未实现**：音频、剪贴板同步、多屏切换、修饰键状态机只留了挂点与 TODO 注释
-   （见 `webrtc_transport.dart` 末尾的表格）。
+9. **v2 只做了音频**：剪贴板同步、多屏切换、修饰键状态机仍未实现（只留挂点与 TODO，
+   见 `webrtc_transport.dart` 末尾表格）。音频虽已接入，但**没有真机听过声音**——
+   iOS 的 `AVAudioSession` 配置、Android 的通信模式路由都只有代码路径，需真机验证。
 10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 8 节）。
 11. **`uu-agent` 产物还没随包**：桌面端被控开关会显示「被控端未随包分发」，需要 release 流程
     把 pyinstaller 产物拷到 6.3 的三个路径（macOS 还要签名）。生命周期与路径查找已用假 agent
@@ -408,7 +421,7 @@ flutter build bundle     # Dart 全量编译，但不出安装包
   macOS 打进 `Contents/Resources/agent/` 并签名，Windows 放 exe 同目录，Linux 放
   `bundle/data/flutter_assets/agent/`。CI 目前不构建 Agent，需要 release 流程补一步拷贝；
   `flutter build bundle` 不含它（也没法含，二进制由 pyinstaller 产出）。
-- `flutter test` 现在 39 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
+- `flutter test` 现在 42 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
   `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ 被控端路径/参数/进程生命周期
   （`test/agent_host_test.dart`，真起 `/bin/sh` 假 agent）+ UI 组件；仍没有 widget/集成测试
   （需要真机或模拟器，且 WebRTC 必须有 Agent 在对面）。

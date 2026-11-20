@@ -51,6 +51,15 @@ abstract class MediaTransport {
   /// WebRTC 专用统计源；JPEG 通路返回 `null`（页面按帧流自己数 fps）。
   ValueListenable<TransportStats>? get stats => null;
 
+  /// 远端音频轨是否已经挂上（协议 v2 §1）。JPEG 通路恒为 false。
+  ///
+  /// 页面用它决定要不要显示 🔊/🔇：**只有 hello.audio 为真且真的收到轨**才显示，
+  /// 缺音频绝不影响视频通路（不走 fallback）。
+  bool get hasAudio => false;
+
+  /// 本地静音（只改本机音量，**不通知 Agent**，协议 v2 §1）。
+  Future<void> setAudioMuted(bool muted) async {}
+
   Future<void> start({
     required AgentHello hello,
     required RoomConfig room,

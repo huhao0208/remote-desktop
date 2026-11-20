@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart' show BoxFit;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uu_remote/core/app_config.dart';
+import 'package:uu_remote/media/jpeg_transport.dart';
 import 'package:uu_remote/media/media_transport.dart';
 import 'package:uu_remote/media/webrtc_transport.dart';
 
@@ -26,6 +27,22 @@ void main() {
       expect(transport.stats.value.fps, isNull);
       expect(transport.fallbackReason, isNull);
       expect(transport.buildView(fit: BoxFit.contain), isNotNull);
+      addTearDown(transport.dispose);
+    });
+
+    test('还没收到音频轨时 hasAudio 为 false，静音调用不抛', () async {
+      final WebRtcTransport transport = WebRtcTransport();
+      expect(transport.hasAudio, isFalse);
+      await transport.setAudioMuted(true); // 无轨时必须是 no-op
+      addTearDown(transport.dispose);
+    });
+  });
+
+  group('JPEG 通路没有音频', () {
+    test('hasAudio 恒为 false，setAudioMuted 是 no-op', () async {
+      final JpegTransport transport = JpegTransport();
+      expect(transport.hasAudio, isFalse);
+      await transport.setAudioMuted(true);
       addTearDown(transport.dispose);
     });
   });
