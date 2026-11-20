@@ -57,10 +57,16 @@ def _build_env(args: argparse.Namespace) -> Env:
 
 def _setup(env: Env, args: argparse.Namespace) -> List[str]:
     notes: List[str] = []
-    env.start_server()
+    env.keep_awake()
     if not args.auto_env:
+        if not env.ping():
+            raise RuntimeError("--no-auto-env 但服务端未就绪（先手动起 srv2/server.py，或去掉该参数）")
         notes.append("--no-auto-env：复用已运行的服务端/Agent")
         return notes
+    env.start_server()
+    # 必须在 Agent 启动前探测抓屏：Agent 自己的采集会占住同一条采集通道，
+    # 并发探测会假性变成 30s（不是产品/权限问题）
+    env.capture_seconds()
 
     expect = "webrtc" if args.transport == "webrtc" else "jpeg"
     existing = None

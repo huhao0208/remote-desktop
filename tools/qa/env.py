@@ -78,8 +78,27 @@ class Env:
         self._token: Optional[str] = None
         self._browser: Optional[cdp.Browser] = None
         self._owned_tabs: set = set()
+        self._caffeinate: Optional[subprocess.Popen] = None
         self.server_owned = False
         self.agent_owned = False
+
+    def keep_awake(self, seconds: int = 1800) -> None:
+        """抓屏对显示休眠极敏感：跑套件期间用 caffeinate 顶住显示不休眠。"""
+        if platform.system() != "Darwin" or self._caffeinate:
+            return
+        try:
+            self._caffeinate = subprocess.Popen(
+                ["caffeinate", "-d", "-u", "-t", str(seconds)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            self._caffeinate = None
+
+    def ping(self, timeout: float = 3) -> bool:
+        try:
+            with urllib.request.urlopen(self.server + "/control", timeout=timeout) as r:
+                return r.status == 200
+        except Exception:
+            return False
 
     # ------------------------------------------------------------ 生命周期
     @property
@@ -156,6 +175,9 @@ class Env:
         self._agent_proc = None
 
     def close(self) -> None:
+        if self._caffeinate and self._caffeinate.poll() is None:
+            self._caffeinate.terminate()
+        self._caffeinate = None
         self.stop_agent()
         if self.server_owned:
             self.stop_server()
@@ -321,12 +343,17 @@ class Env:
         """本机单次抓屏耗时（秒）。macOS 屏幕录制权限异常时会阻塞 ~30s/帧，
         此时任何媒体用例都无帧可推，必须先区分「环境未就绪」与「产品回归」。"""
         if getattr(self, "_cap_s", None) is None:
+            # 必须用 Agent 真正的解释器探测：TCC 屏录授权是按可执行文件给的，
+            # 测试进程（.venv python）的权限不代表 Agent 的权限。
+            code = ("import time,mss;s=mss.MSS();t=time.monotonic();s.grab(s.monitors[1]);"
+                    "print(round(time.monotonic()-t,3))")
+            env = dict(os.environ)
+            if self.agent_pythonpath:
+                env["PYTHONPATH"] = self.agent_pythonpath
             try:
-                import mss
-                t0 = time.time()
-                with mss.mss() as s:
-                    s.grab(s.monitors[1])
-                self._cap_s = round(time.time() - t0, 2)
+                out = subprocess.run([self.agent_py, "-c", code], capture_output=True,
+                                     timeout=90, env=env)
+                self._cap_s = float((out.stdout or b"").decode().strip().splitlines()[-1])
             except Exception:
                 self._cap_s = -1.0
         return self._cap_s
@@ -335,8 +362,8 @@ class Env:
         sec = self.capture_seconds()
         if 0 <= sec <= limit:
             return None
-        hint = ("运行 Agent 的 python 缺少「屏幕录制」TCC 授权（或已被拒），"
-                "授权后需重启 Agent 再跑")
+        hint = ("先确认显示器处于活动状态（合盖/无活动显示/休眠都会让 mss 抓屏阻塞 ~30s，"
+                "系统 screencapture 仍快），醒屏后仍慢则查「屏幕录制」TCC 授权；改完需重启 Agent")
         if sec < 0:
             return f"环境不满足：本机 mss 抓屏探测抛异常；{hint}"
         return (f"环境不满足：本机 mss 进程内抓屏单帧 {sec}s（阈值 {limit}s），"
@@ -355,11 +382,14 @@ class Env:
             "artifacts": str(self.run_dir),
         }
 
-    @staticmethod
-    def _monitor_count() -> int:
+    def _monitor_count(self) -> int:
+        code = "import mss;print(max(0,len(mss.MSS().monitors)-1))"
+        env = dict(os.environ)
+        if self.agent_pythonpath:
+            env["PYTHONPATH"] = self.agent_pythonpath
         try:
-            import mss
-            with mss.mss() as s:
-                return max(0, len(s.monitors) - 1)
+            out = subprocess.run([self.agent_py, "-c", code], capture_output=True,
+                                 timeout=30, env=env)
+            return int((out.stdout or b"").decode().strip().splitlines()[-1])
         except Exception:
             return -1

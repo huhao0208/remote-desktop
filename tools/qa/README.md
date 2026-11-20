@@ -26,6 +26,9 @@ tools/qa/
 | Agent | `cd agent && ../.venv/bin/python agent.py --server http://127.0.0.1:8443 --mobile <手机号> --name QA-PC --transport webrtc` |
 | Chrome 代理 | `http://127.0.0.1:3456`，端点 `/targets` `/new?url=` `/navigate` `/eval?target=` `/screenshot?target=` `/close`。**优先复用已有代理**；没有时代码会用本机 Chrome headless 自建（本机 Chrome 157 上不稳定，仅兜底，见「已知不稳定项」） |
 | 屏幕录制权限 | **必须**授予运行 Agent 的 python 屏幕录制权限，否则抓屏 30s/帧，媒体用例会以「环境不满足」SKIP。注意 TCC 按**可执行文件**授权：默认是 `.workbuddy/binaries/python/versions/<ver>/bin/python3.13`；换了 Agent 解释器用 `--agent-python` 指定 |
+| 已授权解释器（绕行） | 本机若只有 uv python3.11 有屏录授权，可 `uv pip install --python <py311> --target /tmp/py311deps mss pillow aiortc websockets httpx pyautogui`，然后 `run_all.py --agent-python <py311> --agent-pythonpath /tmp/py311deps`，无需改 venv/产品代码 |
+
+一键准备（当 `.venv` 的 python 没有屏录授权时）：`bash tools/qa/setup_agent_env.sh` —— 自动从系统 TCC 里找已授权的 python、把依赖装到 `/tmp/qa-agent-deps`，并打印可直接执行的 `run_all` 命令。
 
 **账号隔离**：默认 `13900000001`。若同账号下已有别人在跑的 Agent（名字不是 `QA-PC`），用例可能点到它；
 建议用独立手机号（如 `13900000003`）跑，`--auto-env` 会自己起一个 `QA-PC` 并在结束时回收。
@@ -112,7 +115,9 @@ cd <repo>
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 首帧首次 1000–1200ms | Chrome 首次初始化 H.264 解码器 | 用例自动重载控制页再测一次，记录 `cold_start_ms`，以预热值判定 |
-| 媒体/兜底用例 SKIP，原因含「抓屏单帧 30s」 | macOS 屏幕录制权限被拒/变更后未重启 Agent | 重新授权 + 重启 Agent；这是环境闸门，不是产品 FAIL |
+| 媒体/兜底用例 SKIP，原因含「抓屏 30s / 抛异常」 | 两种成因：①显示器休眠或无活动显示（`monitors` 变 `0×0`）；②该 python 没有「屏幕录制」TCC 授权（TCC 按**可执行文件**授权，换解释器即失效） | 先 `caffeinate -d -u -t 60` 并确认 `CGDisplayIsAsleep=0`，仍 30s 则去系统设置授权该 python 路径并重启 Agent；也可 `--agent-python` 换成已授权的解释器 |
+| 手动测抓屏得到 30s，但套件里是好的 | Agent 运行中会持续占用采集通道，此时再并发探测会假性 30s | 套件在**启动 Agent 之前**做抓屏探测（结果缓存），手工复现请在没有 Agent 采集时测 |
+| 首帧数秒、fps 掉到个位数 | 同一台 Mac 上同时跑多个 Agent（各自持续抓屏），采集通道互相抢占 | 媒体/兜底用例要求**单 Agent** 环境；跑前先停掉其它 Agent（本机实测：单 Agent 14.2 fps，另有 2 个 Agent 在线时掉到 3 fps） |
 | 页面 `0 fps` 但 PC `connected` | Agent 抓屏卡住 / 帧未产生 | 看 `agent.log` 是否有 `answer 已发`，再测 `ScreenTrack.recv()` 耗时 |
 | 点到别人的设备 | 同账号下有多个在线可控 PC | 用独立手机号，或保证只有 `QA-PC` 在线 |
 | 用例中途 RTC 回落 JPEG | Agent 被重启 / 网络抖动 | 报告里 `abort=rtc_failed_回落到JPEG`，重跑 |
