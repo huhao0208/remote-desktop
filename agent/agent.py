@@ -203,40 +203,25 @@ def _paste_text(text: str) -> None:
 
 # ---------------------------------------------------------------- 多显示器
 
-def _screen_names(count: int) -> tuple[list[str], int]:
-    """显示器名字与主屏下标（macOS 走 NSScreen，其它平台用通用名）。"""
-    names = [f"显示器 {i + 1}" for i in range(count)]
-    primary = 0
-    if SYSTEM == "Darwin":
-        try:
-            from AppKit import NSScreen
-
-            screens = list(NSScreen.screens())
-            if len(screens) == count:  # 数量对不上就不猜，避免张冠李戴
-                names = [str(s.localizedName()) for s in screens]
-                primary = 0  # NSScreen.screens()[0] 即含菜单栏的主屏
-        except Exception:
-            pass
-    return names, primary
-
-
 def list_screens() -> list[dict]:
-    """枚举显示器；下标即协议里的 `screens.list[].id`（= mss.monitors[1:] 顺序）。"""
+    """协议 `screens.list`：id 即显示器下标（顺序与 screens.py 一致）。
+
+    数据源优先 mss；macOS 上 mss 被 TCC 挡住（monitors 只有 0×0）时回落到 Quartz，
+    此时抓屏走 screencapture 通道，仍然能出画面。
+    """
     try:
-        with _new_mss() as sct:
-            mons = list(sct.monitors[1:])
+        mons = list_monitors()
     except Exception as e:
         print(f"[agent] 枚举显示器失败: {e}", flush=True)
         return []
-    names, primary = _screen_names(len(mons))
     return [{
         "id": i,
         "w": int(m["width"]),
         "h": int(m["height"]),
         "x": int(m["left"]),
         "y": int(m["top"]),
-        "name": names[i],
-        "primary": i == primary,
+        "name": m["name"],
+        "primary": bool(m["primary"]),
     } for i, m in enumerate(mons)]
 
 
@@ -413,7 +398,14 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                              "stream": dict(stream_cfg)})
             if screens:
                 await send_json({"p": "screens", "current": cur_screen, "list": screens})
+            else:
+                # 没显示器/没屏录授权：让控制端提示原因而不是黑屏转圈。
+                # 每次 hello（含 peer.join 重发）都带上，后进房的客户端也能收到。
+                await send_json({"p": "agent.error", "err": "screen_permission"})
 
+        if not screens:
+            # 启动自检：进程不退出——信令、输入、剪贴板仍然可用
+            print("[agent] 无可用显示器或缺少屏幕录制授权（monitors 为空）", flush=True)
         await send_hello()
 
         async def rx() -> None:
@@ -495,6 +487,16 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             def capture_loop() -> None:
                 import hashlib
                 last_hash = None
+                err_sent = [False]
+                use_pil = [False]  # JPEG 通路降级后端（macOS: screencapture）
+
+                def _notify_once(err: str) -> None:
+                    if err_sent[0]:
+                        return
+                    err_sent[0] = True
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(send_json({"p": "agent.error", "err": err})))
+
                 with _new_mss() as sct:
                     while not stop.is_set():
                         # WebRTC 连上后 streaming 会被清掉：此时必须彻底停止抓屏，
@@ -506,10 +508,28 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                         t0 = time.monotonic()
                         interval = 1.0 / stream_cfg["fps"]
                         try:
-                            idx = capture_mon[0] + 1
-                            mon = sct.monitors[idx] if idx < len(sct.monitors) else sct.monitors[1]
-                            shot = sct.grab(mon)
-                            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                            # 无授权/无显示时 monitors 只有 0×0 的虚拟项：不能盲目 grab
+                            mons = [m for m in sct.monitors[1:]
+                                    if m["width"] > 0 and m["height"] > 0]
+                            if not mons:
+                                _notify_once("screen_permission")
+                                time.sleep(0.5)
+                                continue
+                            m = mons[min(capture_mon[0], len(mons) - 1)]
+                            if use_pil[0]:  # 降级后端：macOS 的 screencapture，不受 mss 那条 TCC 通道限制
+                                from PIL import ImageGrab
+                                img = ImageGrab.grab(bbox=(m["left"], m["top"],
+                                                           m["left"] + m["width"],
+                                                           m["top"] + m["height"]))
+                            else:
+                                g0 = time.monotonic()
+                                shot = sct.grab(m)
+                                if SYSTEM == "Darwin" and time.monotonic() - g0 > 3:
+                                    use_pil[0] = True
+                                    _notify_once("screen_timeout")
+                                    print("[agent] JPEG 抓屏超时，切到 ImageGrab(screencapture) 后端",
+                                          flush=True)
+                                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
                             w = stream_cfg["width"]
                             if img.width > w:
                                 img = img.resize((w, max(2, int(img.height * w / img.width))),
@@ -528,8 +548,14 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                                 ts = int(time.time() * 1000).to_bytes(8, "big")
                                 data = FRAME_MAGIC + ts + buf.getvalue()
                                 loop.call_soon_threadsafe(_offer, data)
-                        except Exception:
-                            pass  # 单帧失败跳过，不断流
+                        except Exception as e:
+                            # mss 抛错（无授权/显示器消失）：macOS 上切 screencapture 再试
+                            if SYSTEM == "Darwin" and not use_pil[0]:
+                                use_pil[0] = True
+                                _notify_once("screen_permission")
+                                print(f"[agent] JPEG 抓屏失败（{e}），切到 ImageGrab(screencapture) 后端",
+                                      flush=True)
+                            time.sleep(0.2)  # 单帧失败跳过，不断流
                         time.sleep(max(0.0, interval - (time.monotonic() - t0)))
 
             def _offer(data: bytes) -> None:

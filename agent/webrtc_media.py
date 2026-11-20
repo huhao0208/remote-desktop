@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import fractions
+import platform
 import threading
 import time
 from collections import deque
@@ -26,58 +27,212 @@ from aiortc.mediastreams import AudioStreamTrack, MediaStreamError, VideoStreamT
 
 from PIL import Image
 
+try:  # 脚本直跑与包内导入都要能用
+    from .screens import list_monitors
+except ImportError:
+    from screens import list_monitors
+
+SYSTEM = platform.system()  # Windows / Darwin / Linux
+
 # aiortc 的 H.264 码率被 MIN/MAX 夹住（500k–3M），直接调 setter 会被截断到 3 Mbps，
 # 1080p 屏幕在 3 Mbps 下依然偏软。这里写私有字段绕过 clamp（内部实现，升级需复核）。
 _ENC_PRIVATE_BITRATE = "_H264Encoder__target_bitrate"
 
 
+def new_mss():
+    """mss 10 起 mss.mss() 被弃用（会刷 DeprecationWarning）。"""
+    import mss
+
+    return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+
+
+def usable_monitors() -> list:
+    """可用显示器列表（mss 不可用时自动回落到 Quartz，返回项含 source 字段）。"""
+    return list_monitors()
+
+
 class ScreenTrack(VideoStreamTrack):
-    """把 mss 抓屏伪装成 WebRTC 视频轨。
+    """把屏幕抓取伪装成 WebRTC 视频轨。
 
     抓屏是阻塞调用（5–20ms），放到线程里跑，避免卡住 asyncio 事件循环；
     mss 实例按线程缓存（mss 不支持跨线程共享）。
 
     `monitor` 是 `sct.monitors[1:]` 的下标（0 = 主屏），与 Agent 下发的
     `screens.list[].id` 一一对应；多屏切换时整体重建本轨（分辨率变了）。
+
+    健壮性（本地实测过：无授权时 mss 会卡 30s，且阻塞期间持 GIL，
+    整条链路会一起停摆）：
+    - 启动自检：没显示器/没授权 → 记 `screen_permission`，进程不退出
+    - 抓屏看门狗：单次抓屏超时 3s 就跳过该帧，且**不并发堆积**新抓屏线程
+    - 降级后端：macOS 上 mss 超时/失败后切 `screencapture`（ImageGrab，走另一条
+      TCC 通道，实测 0.15–0.39s）
     """
 
     kind = "video"
+    GRAB_TIMEOUT = 3.0
 
-    def __init__(self, width: int = 1920, fps: int = 30, monitor: int = 0) -> None:
+    def __init__(self, width: int = 1920, fps: int = 30, monitor: int = 0,
+                 on_error: Optional[Callable[[str], None]] = None,
+                 log: Optional[Callable[[str], None]] = None) -> None:
         super().__init__()
         self.max_width = max(640, int(width))
         self.fps = max(1, min(60, int(fps)))
         self.monitor = max(0, int(monitor))
         self._tls = threading.local()
-        self.frames = 0
+        self._log = log or (lambda m: print(m, flush=True))
+        self._on_error = on_error
+        self.backend = "mss"  # mss | pil（pil = macOS screencapture 通道）
+        self.sent = 0
+        self.grab_fail = 0
+        self.grab_timeout = 0
+        self._pending: Optional[asyncio.Task] = None  # 在飞的抓屏线程
+        self._ready: Optional[Image.Image] = None     # 抓到但还没送出的图
+        self._last: Optional[Image.Image] = None      # 上一张成功帧（超时时复制）
+        self._notified: set = set()
+        self.available = self._check_screen()
 
-    def _grab_sync(self):
-        import mss
+    # ------------------------------------------------------------ 自检/告警
 
+    def _notify(self, err: str) -> None:
+        """同一种错误只上报一次，避免刷屏。"""
+        if err in self._notified:
+            return
+        self._notified.add(err)
+        if self._on_error:
+            try:
+                self._on_error(err)
+            except Exception:
+                pass
+
+    def _check_screen(self) -> bool:
+        mons = list_monitors()
+        if not mons:
+            self._log("[agent] 无可用显示器或缺少屏幕录制授权（monitors 为空）")
+            self._notify("screen_permission")
+            return False
+        if self.monitor >= len(mons):
+            self.monitor = 0
+        if mons[0].get("source") == "quartz":
+            # mss 的显示器列表被 TCC 挡住（0×0），但 screencapture 通道仍可用
+            self.backend = "pil"
+            self._log("[agent] mss 不可用（TCC），改用 ImageGrab(screencapture) 抓屏")
+        return True
+
+    def _on_timeout(self) -> None:
+        self.grab_timeout += 1
+        if self.grab_timeout == 1 or self.grab_timeout % 10 == 0:
+            self._log(f"[agent] 抓屏超时 {self.grab_timeout} 次（>{self.GRAB_TIMEOUT:.0f}s），跳过该帧")
+        if self.grab_timeout == 1:
+            self._notify("screen_timeout")
+        # macOS：mss 走 CGWindowList，无授权/无显示时会一直卡；
+        # 切到 screencapture 通道（ImageGrab），并放弃卡住的那次抓屏（只切一次）
+        if self.backend == "mss" and SYSTEM == "Darwin":
+            self.backend = "pil"
+            self._log("[agent] 抓屏超时，切到 ImageGrab(screencapture) 后端")
+            if self._pending is not None:
+                self._pending.add_done_callback(_swallow)
+                self._pending = None  # 丢弃结果，避免下一帧继续等它
+
+    # ------------------------------------------------------------ 抓屏（线程内）
+
+    def _monitor_box(self) -> Optional[tuple]:
+        """当前显示器的 (left, top, right, bottom)，screencapture -R 用。"""
+        mons = list_monitors()
+        if self.monitor < len(mons):
+            m = mons[self.monitor]
+            return (m["left"], m["top"], m["left"] + m["width"], m["top"] + m["height"])
+        return None
+
+    def _grab_mss(self) -> Image.Image:
         sct = getattr(self._tls, "sct", None)
         if sct is None:
-            sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+            sct = new_mss()
             self._tls.sct = sct
-        mons = sct.monitors
+        mons = [m for m in sct.monitors[1:] if m["width"] > 0 and m["height"] > 0]
+        if not mons:
+            raise RuntimeError("no usable monitor")
         # 显示器可能在运行中被拔掉：越界退回主屏，不让推流断
-        mon = mons[self.monitor + 1] if self.monitor + 1 < len(mons) else mons[1]
+        mon = mons[min(self.monitor, len(mons) - 1)]
         shot = sct.grab(mon)
-        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def _grab_pil(self) -> Image.Image:
+        from PIL import ImageGrab
+
+        box = self._monitor_box()
+        return ImageGrab.grab(bbox=box) if box else ImageGrab.grab()
+
+    def _grab_sync(self) -> Image.Image:
+        try:
+            img = self._grab_mss() if self.backend == "mss" else self._grab_pil()
+        except Exception as e:
+            if self.backend == "mss" and SYSTEM == "Darwin":
+                self.backend = "pil"
+                self._log(f"[agent] mss 抓屏失败（{e}），切到 ImageGrab(screencapture) 后端")
+                img = self._grab_pil()
+            else:
+                raise
         if img.width > self.max_width:
             h = max(2, int(img.height * self.max_width / img.width / 2) * 2)  # 偶数高度，H.264 要求
             img = img.resize((self.max_width, h), Image.BILINEAR)
         if img.width % 2 or img.height % 2:  # yuv420p 需要偶数宽高
             img = img.crop((0, 0, img.width - img.width % 2, img.height - img.height % 2))
+        self._last = img
+        return img
+
+    # ------------------------------------------------------------ 取帧
+
+    async def _next_image(self) -> Optional[Image.Image]:
+        # 1) 上一次超时后仍在跑的抓屏完成了？收下结果，避免线程越积越多
+        if self._pending is not None and self._pending.done():
+            try:
+                self._ready = self._pending.result()
+            except Exception:
+                self.grab_fail += 1
+            self._pending = None
+        if self._ready is not None:
+            img, self._ready = self._ready, None
+            return img
+        # 2) 上一次还卡着：直接用上一帧，不再起新线程（否则每帧泄漏一个 30s 线程）
+        if self._pending is not None:
+            self._on_timeout()
+            return None
+        # 3) 起一次抓屏，带看门狗
+        self._pending = asyncio.create_task(asyncio.to_thread(self._grab_sync))
+        try:
+            img = await asyncio.wait_for(asyncio.shield(self._pending), timeout=self.GRAB_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._on_timeout()
+            return None
+        except Exception:
+            self.grab_fail += 1
+            self._pending = None
+            return None
+        self._pending = None
         return img
 
     async def recv(self) -> av.VideoFrame:
         pts, time_base = await self.next_timestamp()
-        img = await asyncio.to_thread(self._grab_sync)
+        img = await self._next_image()
+        if img is None:  # 抓不到就复制上一帧，画面定格而不是断流/黑屏
+            img = self._last
+        if img is None:  # 一帧都没成功过：给个占位深色帧，保证编码器有时钟
+            img = Image.new("RGB", (640, 360), (18, 18, 20))
         frame = av.VideoFrame.from_image(img)
         frame.pts = pts
         frame.time_base = time_base
-        self.frames += 1
+        self.sent += 1
         return frame
+
+
+def _swallow(fut: asyncio.Future) -> None:
+    """丢弃被放弃的抓屏线程结果，避免 asyncio 打 'exception was never retrieved'。"""
+    if fut.cancelled():
+        return
+    try:
+        fut.exception()
+    except BaseException:
+        pass
 
 
 class MicTrack(AudioStreamTrack):
@@ -252,6 +407,14 @@ class WebRTCMedia:
     def connected(self) -> bool:
         return any(p.state == "connected" for p in self._peers.values())
 
+    def _emit_error(self, err: str) -> None:
+        """抓屏类错误上报控制端：`agent.error{err:"screen_permission"|"screen_timeout"}`。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._send_json({"p": "agent.error", "err": err}))
+
     def _publish_state(self) -> None:
         if not self._on_state:
             return
@@ -266,8 +429,10 @@ class WebRTCMedia:
             return
         # 排查「协商成功但 0 帧」：关会话时打一行发送统计（稳态零噪声）
         if p.track is not None:
-            self._log(f"[rtc] {peer} 关闭：已发 {p.track.frames} 帧"
-                      f"（{p.track.max_width}w {p.track.fps}fps @显示器{p.track.monitor}）")
+            self._log(f"[rtc] {peer} 关闭：已发 {p.track.sent} 帧"
+                      f"（抓屏失败 {p.track.grab_fail}、超时 {p.track.grab_timeout}，"
+                      f"{p.track.max_width}w {p.track.fps}fps "
+                      f"@显示器{p.track.monitor}/{p.track.backend}）")
         if p.task:
             p.task.cancel()
         if p.mic:
@@ -290,7 +455,8 @@ class WebRTCMedia:
         await self._close_peer(peer)
 
         pc = RTCPeerConnection(RTCConfiguration(iceServers=_parse_ice(ice)))
-        track = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor)
+        track = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor,
+                            on_error=self._emit_error, log=self._log)
         sess = _Peer(pc, track)
         self._peers[peer] = sess
 
@@ -352,7 +518,8 @@ class WebRTCMedia:
         self.monitor = max(0, min(int(idx), self.screen_count - 1))
         for sess in self._peers.values():
             old = sess.track
-            new = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor)
+            new = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor,
+                              on_error=self._emit_error, log=self._log)
             for attr in ("_start", "_timestamp"):  # 续接时间轴
                 if hasattr(old, attr):
                     try:
