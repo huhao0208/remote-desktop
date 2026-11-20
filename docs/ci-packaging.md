@@ -253,10 +253,15 @@ v0.1.0 的 macOS/Linux Flutter 包是坏的（macOS 变成 23 KB 的 `uu_remote`
    单文件 50–102 MB，导致桌面包从 18–21 MB 涨到 **82–121 MB**；且 onefile 每次启动都要
    解压到临时目录，**冷启 4–6 s**。对照：Electron 时代 dmg 144 MB / 解包 274 MB，
    现在 82 MB zip / 121 MB 解包，仍小 2.2 倍，换来「装上即可被控、免装 Python」。
-   **下一版计划（v0.1.3）**：
+   **下一版计划（v0.1.3，两项体积优化一起做，现在不动 CI）**：
    a) agent 改 `--onedir`（dylib 共享、zip 压缩率更高，预计 45–55 MB），
       同时冷启从 4–6 s 降到 <1 s（不用解压）；
-   b) 若仍嫌大，再评估「首次运行按需下载 agent」。
+   b) Android apk 做 ABI 拆分：`flutter build apk --release --split-per-abi`
+      （或单发 `--target-platform android-arm64`），把当前 **88 MB** 的全 ABI 包压到
+      约 **45 MB**。现状是 flutter_webrtc 把各 ABI 的 `libwebrtc.so` 全打进去了；
+      拆分后需在 §9.2 的资产表里写清「arm64-v8a / armeabi-v7a 分别下载哪个」，
+      并提醒用户按手机架构选包（选错会装不上）；
+   c) 若仍嫌大，再评估「首次运行按需下载 agent」。
 
 ## 10. v0.1.0 打包事故复盘（目录被当文件上传）
 
