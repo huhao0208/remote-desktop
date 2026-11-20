@@ -53,20 +53,21 @@ TURN 短时效凭据（HMAC-SHA1，与 coturn `use-auth-secret` 一致）、
 
 ## 客户端策略（2026-11-20 定稿）
 
-**控制端只有两套，Electron / Capacitor 已废弃。**
+**控制端只有一套 Flutter（+ H5 免安装页），Electron 已删除、Capacitor 已停止构建。**
 
 | 端 | 形态 | 状态 |
 |---|---|---|
 | 桌面（Win/macOS/Linux） | **Flutter**（`client-flutter/`） | ✅ 唯一桌面客户端 |
 | 移动（Android/iOS） | **Flutter**（同一工程） | ✅ 唯一移动客户端 |
 | 任意浏览器 | H5 控制页 `srv2/control.html` | ✅ 免安装入口，长期保留 |
-| ~~Electron（`client-desktop/`）~~ | 已废弃 | ⛔ 不再构建/发布，仅留档 |
-| ~~Capacitor（`client-mobile/`）~~ | 已废弃 | ⛔ 同上 |
+| ~~Electron（`client-desktop/`）~~ | v0.1.3 起**已删除** | ⛔ 代码只在 ≤v0.1.2 的 tag 里 |
+| ~~Capacitor（`client-mobile/`）~~ | 已废弃 | ⛔ 不再构建/发布，仅留档 |
 
 废弃理由（实测）：Electron 包 144MB（解包 274MB）、冷启 1–3s；Flutter 包 53MB（解包 128MB）、冷启 0.67s，
 且 Flutter 用 `Texture` 零拷贝通路更适合后续硬解。详见 `docs/客户端框架重选型-Flutter.md`。
 
-> 被控端仍是 `agent/agent.py`（Flutter 桌面版启动时以 `--token` 拉起随包分发的 `uu-agent`，与旧 Electron 行为一致）。
+> 被控端仍是 `agent/agent.py`（Flutter 桌面版启动时以 `--token` 拉起随包分发的 `uu-agent`）。
+> v0.1.3 起 `uu-agent` 是**目录形态**（`uu-agent` + `_internal/`），冷启 0.15s；单独部署时整目录一起拷。
 
 ## 手机远程控制电脑（自研轻量链路）
 

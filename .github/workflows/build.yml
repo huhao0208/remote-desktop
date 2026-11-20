@@ -16,11 +16,14 @@
 #     uu-remote-client-flutter-macos.zip   macOS 桌面（.app 打包成 zip）
 #     uu-remote-client-flutter-linux.tar.gz Linux 桌面（bundle/）
 #     uu-remote-client-flutter-windows.zip Windows 桌面（uu_remote.exe + 依赖目录）
-#     uu-remote-client-flutter-android.apk 安卓
+#     uu-remote-client-flutter-android-arm64-v8a.apk    安卓（近五年手机）
+#     uu-remote-client-flutter-android-armeabi-v7a.apk  安卓（老机器/电视盒子）
 #   手机控制端也可免安装 H5：https://<host>:8443/control
 #
-# 【已废弃，仅留档】desktop-client(Electron) / android-apk(Capacitor) /
-#   ios-project(Capacitor)，三者 `if: false` 且不在 release.needs 里。
+# 【已删除】Electron 桌面端（client-desktop/ 目录与 desktop-client job）
+#   v0.1.3 起彻底移除，需要时从 git 历史取回（v0.1.2 及更早的 tag 里仍有代码）。
+# 【已废弃，仅留档】android-apk(Capacitor) / ios-project(Capacitor)，
+#   两者 `if: false` 且不在 release.needs 里。
 name: build
 
 on:
@@ -99,12 +102,26 @@ jobs:
           # agent 的 WebRTC 通道：webrtc_media 是同目录模块、且只在函数内 import
           # （静态分析看不到），必须 hidden-import；av 带 ffmpeg 动态库，
           # --collect-all av 负责把 .so/.dylib/.dll 一起收进去。
-          pyinstaller --onefile --name uu-agent \
+          #
+          # 用 --onedir 不用 --onefile（v0.1.3 起）：
+          #   onefile 每次启动都要把 ~50MB 解压到临时目录 → 冷启 4–6s；
+          #   onedir 直接加载，冷启 <1s，且 dylib 在 zip 里压缩率更高、包体更小。
+          #   代价是产物从单文件变成「uu-agent + _internal/」目录，
+          #   随包分发时要把整个目录摊平进客户端（见下面各 flutter-build-* job）。
+          #
+          # --exclude-module 那几个：tkinter 只被 pyautogui 的 mouseinfo/pymsgbox
+          # （弹窗调试工具）需要，agent 从不调用，而且它们在 pyautogui 里是
+          # try/except 懒加载。排除后实测 `import pyautogui` + `pyautogui.size()` 正常，
+          # 单平台省 ~10MB（tcl/tk 运行库 + sounddevice 数据）。
+          pyinstaller --onedir --name uu-agent \
             --collect-submodules mss \
             --collect-submodules aiortc \
             --collect-all av \
             --hidden-import webrtc_media \
             --hidden-import pyautogui --hidden-import PIL \
+            --exclude-module tkinter --exclude-module _tkinter \
+            --exclude-module mouseinfo --exclude-module pymsgbox \
+            --exclude-module sounddevice \
             --distpath dist --workpath build_tmp2 --specpath build_tmp2 \
             agent/agent.py
       - name: Stage package
@@ -112,7 +129,12 @@ jobs:
         run: |
           mkdir -p pkg/server pkg/client
           cp "dist/uu-server${{ matrix.ext }}" pkg/server/
-          cp "dist/uu-agent${{ matrix.ext }}" pkg/client/
+          # onedir：整个 dist/uu-agent/ 搬进 pkg/client/uu-agent/
+          # （内含 uu-agent[.exe] 与 _internal/，两者必须同级）
+          cp -R dist/uu-agent pkg/client/
+          echo "--- pkg/client/uu-agent ---"
+          ls -l pkg/client/uu-agent | sed -n '1,8p'
+          du -sh pkg/client/uu-agent
           cp srv2/control.html srv2/docker-compose.yml srv2/Dockerfile srv2/entrypoint.sh pkg/server/ 2>/dev/null || true
           cp README.md pkg/
           mkdir -p pkg/server/certs && touch pkg/server/certs/.gitkeep
@@ -130,8 +152,11 @@ jobs:
           管理页 https://<host>:8443/admin
 
           # 二、电脑客户端 / 被控端（Windows / macOS / Linux）
-          cd client
+          #     uu-agent 是目录形态（uu-agent + _internal/），拷贝/移动都要整目录，
+          #     只拿可执行文件会启动失败（缺 _internal 里的 Python 运行时与 dylib）。
+          cd client/uu-agent
           ./uu-agent --server https://<host>:8443 --mobile <手机号> --name MY-PC
+          （Windows：cd client\uu-agent 然后 uu-agent.exe ...）
           macOS 需授予 屏幕录制 + 辅助功能 权限。
           可选画质参数：--width 1920 --quality 75 --fps 15
 
@@ -180,69 +205,6 @@ jobs:
           path: |
             uu-remote-android-termux.tar.gz
             uu-remote-universal.tar.gz
-          retention-days: 30
-
-  # ------------------------------------------------ 桌面控制端客户端（Electron）
-  # 【已废弃】客户端统一为 Flutter（见 flutter-build-*），Electron 版不再发布。
-  # 代码块故意保留以便回滚；`if: false` 让它恒跳过，也不进 release.needs。
-  desktop-client:
-    if: false   # 已废弃，仅留档
-    needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            name: windows-x64
-            build: "--win"
-          # 一个 arm64 runner 同时产出 arm64 与 x64 两个 dmg（electron-builder 跨架构打包）
-          - os: macos-latest
-            name: macos
-            build: "--mac --arm64 --x64"
-          - os: ubuntu-latest
-            name: linux-x64
-            build: "--linux"
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: client-desktop
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build embedded agent (被控端，随 App 一体分发)
-        working-directory: .          # 回到仓库根，agent/ 与 dist 路径才成立
-        shell: bash
-        run: |
-          pip install pyinstaller mss pillow pyautogui httpx websockets aiortc av numpy
-          pyinstaller --onefile --name uu-agent \
-            --collect-submodules mss \
-            --collect-submodules aiortc \
-            --collect-all av \
-            --hidden-import webrtc_media \
-            --hidden-import pyautogui --hidden-import PIL \
-            --distpath client-desktop/bin --workpath build_tmp_agent --specpath build_tmp_agent \
-            agent/agent.py
-      - name: Install deps
-        run: npm install --no-audit --no-fund
-      - name: Sync control page into client
-        run: node scripts/sync-web.js
-      # 不注入 GH_TOKEN：electron-builder 一旦探测到发布凭据就会去算更新通道
-      # （computeChannelNames），没有 repository 字段时直接崩在 'reading channel'
-      - name: Build client
-        run: npx electron-builder ${{ matrix.build }} --publish never
-      - uses: actions/upload-artifact@v4
-        with:
-          name: uu-remote-client-${{ matrix.name }}
-          path: |
-            client-desktop/release/*.exe
-            client-desktop/release/*.dmg
-            client-desktop/release/*.zip
-            client-desktop/release/*.AppImage
           retention-days: 30
 
   # ------------------------------------------------ 安卓控制端 APK（Capacitor）
@@ -383,19 +345,39 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/agent-pkg/extract"
           tar -xzf "$GITHUB_WORKSPACE/agent-pkg/uu-remote-macos-arm64.tar.gz" \
             -C "$GITHUB_WORKSPACE/agent-pkg/extract" ./client/uu-agent
-          mkdir -p "$APP_PATH/Contents/Resources/agent"
-          install -m 0755 "$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent" \
-            "$APP_PATH/Contents/Resources/agent/uu-agent"
-          ls -l "$APP_PATH/Contents/Resources/agent/uu-agent"
+          SRC="$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent"
+          DST="$APP_PATH/Contents/Resources/agent"
+          mkdir -p "$DST"
+          # onedir 摊平：把 uu-agent 与它的 _internal/ 直接放进 Resources/agent/。
+          # 这样可执行文件仍是 Resources/agent/uu-agent，agent_host.dart 的路径约定不用改；
+          # 且 _internal 与可执行文件同级（PyInstaller 6 按可执行文件所在目录找 _internal）。
+          cp -R "$SRC/." "$DST/"
+          chmod 0755 "$DST/uu-agent"
+          ls -l "$DST/uu-agent"
+          ls -d "$DST/_internal"
+          du -sh "$DST"
       - name: Ad-hoc sign .app
-        # 必须先签里层的 uu-agent，再用 --deep 签整个 .app，否则 Gatekeeper 会拦子进程。
+        # 顺序不能乱：先逐个签 agent 目录里的 Mach-O（av/numpy/pylibsrtp 带一堆
+        # .so/.dylib，沙箱里加载未签名的动态库会被拦），最后签主程序与整个 .app。
         # 没签名时 Release.entitlements 的 app-sandbox=true 会让沙箱初始化直接
         # SIGTRAP 崩溃（_libsecinit_appsandbox）。ad-hoc 签名不是 Developer ID，
         # 只能自用，不能分发给别人的 Mac。
         run: |
           set -euo pipefail
           APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | sed -n '1p')"
-          codesign --force --sign - "$APP_PATH/Contents/Resources/agent/uu-agent"
+          AGENT_DIR="$APP_PATH/Contents/Resources/agent"
+          # 先深后浅：_internal 里的动态库先签，主程序最后签
+          signed=0
+          find "$AGENT_DIR/_internal" -type f -print0 | while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q "Mach-O"; then
+              codesign --force --sign - "$f" >/dev/null 2>&1 || echo "签名失败：$f"
+              echo "$f"
+            fi
+          done > /tmp/signed.txt
+          signed=$(wc -l < /tmp/signed.txt | tr -d ' ')
+          echo "已签 _internal 内 Mach-O：$signed 个"
+          sed -n '1,5p' /tmp/signed.txt
+          codesign --force --sign - "$AGENT_DIR/uu-agent"
           codesign --force --deep --sign - "$APP_PATH"
           # 校验：签名信息里应出现 adhoc；顺手 verify 整个包
           codesign -dv "$APP_PATH" 2>&1 | sed -n '1,8p'
@@ -441,7 +423,7 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build linux --release
-      # 同 macOS：把被控端塞进 bundle/data/flutter_assets/agent/uu-agent
+      # 同 macOS：把被控端整个目录摊平进 bundle/data/flutter_assets/agent/
       - uses: actions/download-artifact@v4
         with:
           name: uu-remote-linux-x64
@@ -452,10 +434,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/agent-pkg/extract"
           tar -xzf "$GITHUB_WORKSPACE/agent-pkg/uu-remote-linux-x64.tar.gz" \
             -C "$GITHUB_WORKSPACE/agent-pkg/extract" ./client/uu-agent
-          mkdir -p build/linux/x64/release/bundle/data/flutter_assets/agent
-          install -m 0755 "$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent" \
-            build/linux/x64/release/bundle/data/flutter_assets/agent/uu-agent
-          ls -l build/linux/x64/release/bundle/data/flutter_assets/agent/uu-agent
+          SRC="$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent"
+          DST="build/linux/x64/release/bundle/data/flutter_assets/agent"
+          mkdir -p "$DST"
+          cp -R "$SRC/." "$DST/"
+          chmod 0755 "$DST/uu-agent"
+          ls -l "$DST/uu-agent"
+          ls -d "$DST/_internal"
+          du -sh "$DST"
       - name: Package bundle into tarball
         # 同 macOS：bundle 是目录，直接上传会与 merge-multiple 打架，
         # v0.1.0 的 Release 里 Linux 桌面包因此整个丢失（既没有 tar 也没有目录条目）。
@@ -508,12 +494,17 @@ jobs:
           $zipIn = Join-Path $pkg 'uu-remote-windows-x64.zip'
           if (-not (Test-Path $zipIn)) { throw "没拿到 Agent 包：$zipIn" }
           Expand-Archive -Path $zipIn -DestinationPath (Join-Path $pkg 'extract') -Force
-          $agent = Join-Path $pkg 'extract\client\uu-agent.exe'
-          if (-not (Test-Path $agent)) { throw "Agent 包里没有 client\uu-agent.exe" }
+          # onedir：client\uu-agent\ 里是 uu-agent.exe + _internal\
+          $agentDir = Join-Path $pkg 'extract\client\uu-agent'
+          if (-not (Test-Path (Join-Path $agentDir 'uu-agent.exe'))) { throw "Agent 包里没有 client\uu-agent\uu-agent.exe" }
+          if (-not (Test-Path (Join-Path $agentDir '_internal'))) { throw "Agent 包缺 _internal，onedir 结构不对" }
           $destDir = 'build/windows/x64/runner/Release/agent'
           New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-          Copy-Item -Path $agent -Destination (Join-Path $destDir 'uu-agent.exe') -Force
+          Copy-Item -Path (Join-Path $agentDir '*') -Destination $destDir -Recurse -Force
           Get-Item (Join-Path $destDir 'uu-agent.exe') | Select-Object Name, Length | Format-List | Out-String | Write-Host
+          $total = (Get-ChildItem (Join-Path $destDir '_internal') -Recurse -File | Measure-Object Length -Sum).Sum
+          Write-Host ("_internal 文件数 {0}，合计 {1:N1} MB" -f `
+            (Get-ChildItem (Join-Path $destDir '_internal') -Recurse -File).Count, ($total / 1MB))
       - name: Package build into zip
         # 同 macOS/Linux：Release 目录不能直接上传（merge-multiple 会拆散），先打一个 zip。
         # 解压即得 uu_remote.exe 与 flutter_windows.dll / data/ 同级，直接双击运行。
@@ -533,6 +524,8 @@ jobs:
           if ($names -notcontains 'uu_remote.exe') { throw 'zip 根目录没有 uu_remote.exe，打包结构不对' }
           # Compress-Archive 在不同 PowerShell 版本里可能写 \ 或 /，两种都认
           if (-not ($names -match '^agent[\\/]uu-agent\.exe$')) { throw 'zip 里没有随包 agent\uu-agent.exe' }
+          # onedir 必须连 _internal 一起进包，否则解压出来的客户端起不了被控端
+          if (-not ($names -match '^agent[\\/]_internal[\\/]')) { throw 'zip 里没有 agent\_internal\，onedir 没收全' }
           Write-Host "entries: $($names.Count)，uu_remote.exe 与 agent\uu-agent.exe 均已确认"
       - uses: actions/upload-artifact@v4
         with:
@@ -559,18 +552,31 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --release
-      - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk uu-remote-client-flutter-android.apk
+      # 按 ABI 拆分：flutter_webrtc 会把各 ABI 的 libwebrtc.so 全塞进一个包，
+      # 全 ABI 包 v0.1.2 实测 88 MB；拆开后每个约 45 MB。
+      # 只发 arm64-v8a（近五年手机）与 armeabi-v7a（老机器/电视盒子），
+      # x86_64 只有模拟器用得上，不占用 Release 位置。
+      - run: flutter build apk --release --split-per-abi
+      - name: Rename APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=build/app/outputs/flutter-apk
+          ls -l "$SRC"
+          cp "$SRC/app-arm64-v8a-release.apk"   uu-remote-client-flutter-android-arm64-v8a.apk
+          cp "$SRC/app-armeabi-v7a-release.apk" uu-remote-client-flutter-android-armeabi-v7a.apk
+          ls -lh uu-remote-client-flutter-android-*.apk
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-android
-          path: client-flutter/uu-remote-client-flutter-android.apk
+          path: |
+            client-flutter/uu-remote-client-flutter-android-arm64-v8a.apk
+            client-flutter/uu-remote-client-flutter-android-armeabi-v7a.apk
           retention-days: 30
 
   # ------------------------------------------------ tag 时发布 Release
-  # 只发 Flutter 客户端 + 服务端/被控端包。Electron/Capacitor 三个 job 已废弃
-  # （desktop-client / android-apk / ios-project，见各自 if: false），不列入 needs。
+  # 只发 Flutter 客户端 + 服务端/被控端包。Electron 已删除；
+  # Capacitor 两个 job（android-apk / ios-project）仍是 if: false，不列入 needs。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, source-packs,

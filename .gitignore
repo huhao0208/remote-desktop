@@ -49,9 +49,6 @@ pc.json
 
 # 客户端工程：源码入库，依赖与构建产物不入库
 node_modules/
-client-desktop/release/
-client-desktop/bin/
-client-desktop/web/
 client-mobile/www/
 client-mobile/android/.gradle/
 client-mobile/android/build/

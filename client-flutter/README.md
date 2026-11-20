@@ -1,6 +1,7 @@
 # client-flutter · UU Remote 控制端（Flutter 骨架）
 
-Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`client-mobile` 行为一致：
+Flutter 版控制端，行为与 `srv2/control.html`（H5 免安装页）、已删除的 `client-desktop`
+（Electron，代码见 ≤v0.1.2 的 tag）保持一致：
 **登录 → 设备列表 → 远控**。画面走 WebRTC（H.264 / SRTP over UDP），`agent.hello.media == "jpeg"`
 时自动用 JPEG 兜底通路。
 
@@ -348,9 +349,14 @@ Electron 版废弃后，**Flutter 客户端自己也要能被控**：登录成�
 | Windows | 可执行文件同目录 `<dir>\uu-agent.exe`（兼容 `<dir>\agent\uu-agent.exe`） |
 | Linux | `<bundle>/data/flutter_assets/agent/uu-agent` |
 
-**打包这一步还没接**：目前仓库里没有 `uu-agent` 产物，直接跑会显示「被控端未随包分发」
-（这是预期行为，不是 bug）。需要 release 流程把 pyinstaller 编出来的可执行文件拷到上表位置，
-macOS 还要 `chmod +x` 并随包签名（否则 Gatekeeper 会拦下子进程）。
+v0.1.3 起 `uu-agent` 是 PyInstaller **onedir** 产物，上表给的是目录里的**可执行文件**路径；
+同一个目录里还必须带 `_internal/`（Python 运行时 + 全部 dylib），两者必须同级。
+CI 的做法是把 `dist/uu-agent/*` 摊平进上表所在目录，所以可执行文件路径本身没变、代码零改动。
+
+**打包已在 CI 接好**（`.github/workflows/build.yml` 三个 `flutter-build-*` job，v0.1.2 起）：
+从同平台的 `uu-remote-<platform>` 包里取出 `client/uu-agent/` 整个目录塞进客户端，
+macOS 还要逐个签 Mach-O 再签 App（否则沙箱里加载 dylib 被拒）。本地直接跑 `flutter run`
+时没有这个目录，会显示「被控端未随包分发」（预期行为，不是 bug），调试按下面指定二进制。
 
 调试时不必等打包：
 
@@ -398,9 +404,11 @@ Agent 的 stdout/stderr 按行转发到 `debugPrint`，前缀 `[uu-agent]` / `[u
    入向 offer 只在未来真新增 m-line 时才会出现。音频虽已接入，但**没有真机听过声音**——
    iOS 的 `AVAudioSession` 配置、Android 的通信模式路由都只有代码路径，需真机验证。
 10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 8 节）。
-11. **`uu-agent` 产物还没随包**：桌面端被控开关会显示「被控端未随包分发」，需要 release 流程
-    把 pyinstaller 产物拷到 6.3 的三个路径（macOS 还要签名）。生命周期与路径查找已用假 agent
-    单测覆盖（`test/agent_host_test.dart` 真起 `/bin/sh`），但没跑过真 uu-agent 端到端。
+11. **`uu-agent` 已随 release 包分发**（v0.1.2 起，见 6.3）：CI 把 onedir 产物摊平进
+    `Contents/Resources/agent/`（macOS）等三个位置；`flutter run` 的本地构建没有这份产物，
+    所以仍会显示「被控端未随包分发」，用 `UU_AGENT_BIN` 指定即可。路径查找与生命周期用假
+    agent 单测覆盖（`test/agent_host_test.dart` 真起 `/bin/sh`），真 uu-agent 端到端未在
+    单测里跑（需真实屏幕授权）。
 12. **被控端只随 App 生活周期**：App 退出 = 停止被控；没有做成开机自启的系统服务。
 
 ---
