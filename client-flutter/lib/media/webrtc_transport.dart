@@ -181,9 +181,10 @@ class WebRtcTransport extends MediaTransport {
         debugPrint('[webrtc] 连接状态处理失败：$e');
       }
     };
-    // TODO(v2-multiscreen): 协议 v2 §3 —— 切换显示器时 Agent 会重建视频轨并主动
-    // 重协商（发来一条 rtc.offer）。届时需要在 _onSignal 里 createAnswer +
-    // setLocalDescription，并把 answer 回给 Agent。v1 不处理入向 offer。
+    // TODO(v2-multiscreen): 协议 v2 §3。实测（agent/webrtc_media.py:556 select_screen）
+    // 切屏走 `sender.replaceTrack(new)` + 强制关键帧，**不重协商、不发 rtc.offer**，
+    // 分辨率变化由 SPS 自适应，客户端无需应答。只有未来 Agent 真的要新增 m-line
+    // （比如新加一条轨）才会出现入向 offer，届时才需要在这里 createAnswer。
 
     final RTCSessionDescription offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -470,7 +471,7 @@ class WebRtcTransport extends MediaTransport {
 // |----------|---------------------------------------------------------------|
 // | 音频     | ✅ 已实现：hello.audio → audio recvonly + 原生播放 + 本地静音 |
 // | 剪贴板   | TODO：{p:'clip',dir:'up'|'down',text} + {p:'clip.sync'}，md5 去重 |
-// | 多屏     | TODO：{p:'screens'} / {p:'screen.select'}，Agent 重协商时答 offer |
+// | 多屏     | TODO：{p:'screens'} / {p:'screen.select'}；Agent 用 replaceTrack 不重协商 |
 // | 修饰键   | 远控页已有 v1 版 keydown/keyup；v2 要求 blur 时全释放          |
 //
 // 以上消息都复用现有 WS，服务端零改动。

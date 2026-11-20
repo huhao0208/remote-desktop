@@ -392,7 +392,10 @@ Agent 的 stdout/stderr 按行转发到 `debugPrint`，前缀 `[uu-agent]` / `[u
 8. **Android 9+ 不支持 `http://` 服务端**：默认未开 `usesCleartextTraffic`，请用 `https://`；
    若内网必须走明文，需在 `AndroidManifest.xml` 加网络明文策略（不推荐）。
 9. **v2 只做了音频**：剪贴板同步、多屏切换、修饰键状态机仍未实现（只留挂点与 TODO，
-   见 `webrtc_transport.dart` 末尾表格）。音频虽已接入，但**没有真机听过声音**——
+   见 `webrtc_transport.dart` 末尾表格）。多屏有个已核实的好消息：Agent 切屏是
+   `sender.replaceTrack()` + 强制关键帧，**不重协商、不发 `rtc.offer`**（`agent/webrtc_media.py`
+   的 `select_screen()`），所以客户端只要处理 `rtc.answer/rtc.ice` 就够，分辨率变化由 SPS 自适应；
+   入向 offer 只在未来真新增 m-line 时才会出现。音频虽已接入，但**没有真机听过声音**——
    iOS 的 `AVAudioSession` 配置、Android 的通信模式路由都只有代码路径，需真机验证。
 10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 8 节）。
 11. **`uu-agent` 产物还没随包**：桌面端被控开关会显示「被控端未随包分发」，需要 release 流程
