@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import 'package:material_ui/material_ui.dart';
 
+import '../core/agent_host.dart';
 import '../core/api_client.dart';
 import '../core/models.dart';
 import '../core/settings.dart';
@@ -439,6 +440,8 @@ class _DeviceListPageState extends State<DeviceListPage> {
   }
 
   Future<void> _logout() async {
+    // 先杀被控端再清会话：token 失效后 Agent 会一直重试登录，日志很吵
+    await AgentHost.instance.stop();
     await Settings.clearSession();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -543,10 +546,34 @@ class _AssistTabState extends State<_AssistTab> {
 }
 
 /// 我的：账号信息、服务器地址（可改）、本机设备 ID、退出登录。全部读真实本地状态。
-class _ProfileTab extends StatelessWidget {
+class _ProfileTab extends StatefulWidget {
   const _ProfileTab({required this.onLoggedOut});
 
   final Future<void> Function() onLoggedOut;
+
+  @override
+  State<_ProfileTab> createState() => _ProfileTabState();
+}
+
+class _ProfileTabState extends State<_ProfileTab> {
+  @override
+  void initState() {
+    super.initState();
+    // 被控端进程状态可能在别处变化（登录/自愈），这里跟着刷新
+    AgentHost.instance.state.addListener(_onAgentChanged);
+    AgentHost.instance.detail.addListener(_onAgentChanged);
+  }
+
+  @override
+  void dispose() {
+    AgentHost.instance.state.removeListener(_onAgentChanged);
+    AgentHost.instance.detail.removeListener(_onAgentChanged);
+    super.dispose();
+  }
+
+  void _onAgentChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -617,9 +644,11 @@ class _ProfileTab extends StatelessWidget {
                     ],
                   ),
                 ),
+                const SizedBox(height: AppSpace.lg),
+                _agentCard(),
                 const SizedBox(height: AppSpace.xl),
                 TextButton(
-                  onPressed: () => onLoggedOut(),
+                  onPressed: () => widget.onLoggedOut(),
                   style: TextButton.styleFrom(
                     foregroundColor: AppColors.danger,
                     minimumSize: const Size(0, 46),
@@ -634,6 +663,98 @@ class _ProfileTab extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  /// 内置被控端开关：与 `AgentHost` 进程状态联动（关闭即杀进程，打开即拉起）。
+  Widget _agentCard() {
+    final AgentHost host = AgentHost.instance;
+    final AgentHostState state = host.state.value;
+    final bool desktop = host.isDesktopPlatform;
+    final bool allowed = Settings.allowBeControlled;
+    final String? detail = host.detail.value;
+    final bool needsRepair =
+        state == AgentHostState.missing || state == AgentHostState.failed;
+
+    String subtitle;
+    Color color = AppColors.muted;
+    if (!desktop) {
+      subtitle = AgentHost.describe(AgentHostState.unsupported);
+    } else if (!allowed) {
+      subtitle = AgentHost.describe(AgentHostState.stopped);
+    } else {
+      subtitle = AgentHost.describe(state);
+      if (detail != null && detail.isNotEmpty && state != AgentHostState.running) {
+        subtitle = '$subtitle · $detail';
+      }
+      if (state == AgentHostState.running) color = AppColors.accent;
+      if (state == AgentHostState.restarting || needsRepair) color = AppColors.warn;
+    }
+
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.sensors, size: 18, color: desktop ? AppColors.muted : AppColors.faint),
+              const SizedBox(width: AppSpace.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      '允许其他设备控制本机',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: desktop ? AppColors.text : AppColors.faint,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11.5, height: 1.4, color: color),
+                    ),
+                  ],
+                ),
+              ),
+              Switch(
+                value: allowed && desktop,
+                onChanged: desktop ? _toggleAgent : null,
+              ),
+            ],
+          ),
+          if (needsRepair) ...<Widget>[
+            const SizedBox(height: AppSpace.sm),
+            Text(
+              '把打包好的 uu-agent 放到应用资源目录后重试；开发时可用 '
+              'UU_AGENT_BIN=/path/to/uu-agent 启动。',
+              style: const TextStyle(fontSize: 11, color: AppColors.faint, height: 1.4),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => AgentHost.instance.syncSession(force: true),
+                child: const Text('重试启动'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleAgent(bool value) async {
+    await Settings.setAllowBeControlled(value);
+    if (mounted) setState(() {});
+    await AgentHost.instance.syncSession(force: true);
+    if (!mounted) return;
+    if (value && AgentHost.instance.state.value == AgentHostState.missing) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('被控端未随包分发，本机暂时无法被控制')),
+      );
+    }
   }
 
   Widget _row(BuildContext context, {required IconData icon, required String label, required String value, VoidCallback? onTap}) {
@@ -686,6 +807,8 @@ class _ProfileTab extends StatelessWidget {
     );
     if (result != null && result.isNotEmpty) {
       await Settings.setServerBase(result);
+      // 被控端把 --server 当启动参数，换了地址必须重起才会连新服务器
+      unawaited(AgentHost.instance.syncSession(force: true));
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存，重新登录后生效')));
       }

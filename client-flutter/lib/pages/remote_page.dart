@@ -243,7 +243,7 @@ class _RemotePageState extends State<RemotePage> {
       }
       if (transport is WebRtcTransport) {
         // 运行中 failed/disconnected → 回落 JPEG（协议 §5）
-        transport.onFallback = _fallbackFromWebRtc;
+        transport.onFallback = _onWebRtcFallback;
       }
       setState(() => _transport = transport);
       _bindStats(transport);
@@ -294,6 +294,15 @@ class _RemotePageState extends State<RemotePage> {
   }
 
   /// WebRTC 中途断链（`connectionState` failed/disconnected）→ 切回 JPEG。
+  ///
+  /// 用同步壳包一层：传输层是在原生回调/计时器里调它，返回的 Future 没人 await，
+  /// 一旦这里抛异常就会变成 Zone 顶层未捕获错误。
+  void _onWebRtcFallback(String reason) {
+    unawaited(_fallbackFromWebRtc(reason).catchError((Object e) {
+      debugPrint('[webrtc] 回落 JPEG 失败：$e');
+    }));
+  }
+
   Future<void> _fallbackFromWebRtc(String reason) async {
     final RoomConfig? room = _room;
     final SignalingClient? signaling = _signaling;
@@ -325,7 +334,7 @@ class _RemotePageState extends State<RemotePage> {
   void _onStats() {
     final TransportStats? stats = _statsListenable?.value;
     if (stats == null) return;
-    if (stats.fps > 0) _lastFrameAt = DateTime.now();
+    if ((stats.fps ?? 0) > 0) _lastFrameAt = DateTime.now();
     if (!mounted) return;
     setState(() => _stats = stats);
   }
@@ -685,14 +694,18 @@ class _RemotePageState extends State<RemotePage> {
     final AgentHello? hello = _hello;
     final bool webRtc = _transport?.kind == 'webrtc';
     if (webRtc) {
-      // 协议 §7 要求的 HUD：编码 · 实际 fps · 实际分辨率（来自 getStats）
+      // 协议 §7 要求的 HUD：编码 · 实际 fps · 实际分辨率（来自 getStats）。
+      // fps 还没统计到（未收到首帧）时显示 —，不要显示 0 fps 让人以为卡住。
+      final int? fps = _stats.fps;
       final int w = _stats.width > 0 ? _stats.width : (hello?.width ?? 0);
       final int h = _stats.height > 0 ? _stats.height : (hello?.height ?? 0);
       return <Widget>[
         HudChip(
-          text: 'H.264 · ${_stats.fps} fps · $w×$h',
+          text: 'H.264 · ${fps == null ? '—' : '$fps fps'} · $w×$h',
           icon: Icons.bolt,
-          color: _stats.fps >= 24 ? AppColors.accentHover : AppColors.warn,
+          color: fps == null
+              ? AppColors.videoMuted
+              : (fps >= 24 ? AppColors.accentHover : AppColors.warn),
         ),
         const SizedBox(width: AppSpace.xs),
       ];

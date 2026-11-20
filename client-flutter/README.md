@@ -25,10 +25,12 @@ Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`cl
 | `stream.config` 画质切换（流畅/高清/超清，含 bitrate） | ✅ |
 | `MediaTransport` 抽象 + `JpegTransport` / `WebRtcTransport` | ✅ |
 | WebRTC `rtc.offer/answer/ice/close` | ✅ 见 `lib/media/webrtc_transport.dart` |
+| **桌面端内置被控端（`uu-agent` 子进程）** | ✅ 见第 6 节（产物需 release 流程随包拷贝） |
+| 移动端被控 | ❌ 不做（系统限制），移动端只做控制端 |
 | 关机 `shutdown` UI、文件传输、剪贴板、音频、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
 
 骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze --fatal-infos` → **No issues found**，
-`flutter test` → 22 passed，`flutter build bundle`（Dart 全量编译）通过。
+`flutter test` → 39 passed，`flutter build bundle`（Dart 全量编译）通过。
 
 ---
 
@@ -46,6 +48,7 @@ lib/
     input_events.dart       输入事件构造 + 键位映射（对齐 MODKEYS/KEYMAP）
     theme.dart              深色主题 #0d1117 / #161b22 / #2ea043
     window_setup.dart       桌面窗口初始/最小尺寸（window_manager）
+    agent_host.dart         内置被控端：uu-agent 子进程生命周期 / 路径查找 / 日志转发
   signaling/
     signaling_client.dart   房间 WS：文本=JSON、二进制=画面帧，双向流
   media/
@@ -61,6 +64,7 @@ lib/
 test/
   protocol_test.dart        协议字段解析、信令地址组装、FRM1 帧头
   rtc_signaling_test.dart   ice_servers 转换、rtc.offer/rtc.ice 载荷
+  agent_host_test.dart      被控端路径查找 / 启动参数 / 子进程生命周期
 ```
 
 ### 页面 → 通路 的解耦点
@@ -106,6 +110,9 @@ flutter analyze          # 期望：No issues found（或仅 warning）
 flutter test             # 协议单测
 flutter run -d macos     # 需 Xcode；Windows/Linux 同理
 flutter run -d chrome    # ❌ 不支持：代码用了 dart:io Platform / WebSocket
+
+# 联调：钉死服务端，不用改本地 prefs（优先级：UU_SERVER > 内置常量 > 用户保存值）
+flutter run -d macos --dart-define=UU_SERVER=https://127.0.0.1:8444
 ```
 
 平台骨架（`macos/` `windows/` `linux/` `android/` `ios/`）由下面这条命令生成，已包含在仓库里：
@@ -190,7 +197,8 @@ Flutter 控制端                                    Agent
 4. 收 `rtc.answer` → `setRemoteDescription(RTCSessionDescription(sdp, 'answer'))`。
    早到的远端候选先缓存，answer 落地后补投（协议 §2.3）。
 5. `onTrack` → `RTCVideoRenderer.srcObject = event.streams[0]`；页面用 `RTCVideoView(renderer)`
-   渲染原生纹理，`BoxFit.contain` 保持 1:1 像素，不超采样。
+   渲染原生纹理，`BoxFit.contain` 保持 1:1 像素，不超采样。`event.streams` 为空时（aiortc 未带
+   msid）自建一个容器 `MediaStream` 把轨挂上去，否则会出现「协商成功但永远 0 帧」。
 6. 远端候选 → `pc.addCandidate(RTCIceCandidate(candidate, sdpMid, sdpMLineIndex))`。
 
 ### 5.2 清晰度（命门，别改）
@@ -200,21 +208,29 @@ Flutter 控制端                                    Agent
 | transceiver | **maintain-resolution** | flutter_webrtc 没有 `transceiver.degradationPreference`，等价写法是把 `RTCDegradationPreference.MAINTAIN_RESOLUTION` 写进 sender 的 RTP 参数（`sender.setParameters`）；recvonly 无 SSRC 时平台可能拒绝，已 catch，**不影响收流** |
 | 接收端渲染 | `BoxFit.contain` | 不做缩放，画面像素与编码分辨率 1:1 |
 | 被控端 | `stream.config.bitrate` | 页面切档位时随 `stream.config` 下发 4000/8000/20000 kbps，真正决定清晰度的是这条（Agent 侧 8 Mbps + 同策略） |
-| `jitterBufferTarget = 0` | ❌ 未实现 | 插件未暴露该参数，见「已知限制」 |
+| `jitterBufferTarget = 0` | ❌ 未实现 | 插件未暴露该参数，抖动缓冲由插件默认策略控制（实测 20–50ms），见「已知限制」 |
 
 HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
 `inbound-rtp(kind=video)`：`framesPerSecond` / `frameWidth` / `frameHeight`
 （没有 `framesPerSecond` 时按 `framesDecoded` 差分自算）。
 
+**还没收到首帧时 fps 显示 `—`**（不是 `0 fps`）：`TransportStats.fps` 为 `null` 表示「没统计到」，
+一旦收到过帧，后续掉到 0 就是真卡住，如实显示 `0 fps`。这样「协商成功但没帧」不会看起来像「卡在 0 帧」。
+
 ### 5.3 失败怎么回落（协议 §5）
 
 | 时机 | 行为 |
 |---|---|
-| `start()` 抛错（平台不支持 / 建 PC 失败 / 无法初始化渲染器） | 页面 catch → 装 `JpegTransport` → toast「H.264 直连不可用，已回落 JPEG」 |
-| 协商期失败（`setRemoteDescription` 报错） | 传输层记下 `fallbackReason`，页面在 `start()` 返回后补查并回落 |
-| 运行中 `connectionState` = `failed` / `disconnected` | `onFallback` 回调 → 关 PC → 切回 JPEG → toast（含原因） |
+| 建链失败（`createPeerConnection` / `addTransceiver` / `createOffer` / `setLocalDescription` / 渲染器初始化） | `start()` **不再往外抛**，统一记 `fallbackReason` + `onFallback`；页面在 `start()` 返回后补查并装 `JpegTransport` |
+| 协商期失败（`setRemoteDescription` 报错） | 同上（`fallbackReason = 'SDP 协商失败'`） |
+| 单条远端候选 `addCandidate` 失败 | 只记日志，不作废协商（候选冲突很常见） |
+| 运行中 `connectionState` = `failed` / `disconnected` | `onFallback` → 关 PC → 切回 JPEG → toast（含原因） |
 | 收到 `rtc.close` | 同上（对端主动收线，Agent 会恢复 JPEG 推流） |
 | 回落前后 | 传输层 dispose 时补发一条 `rtc.close`，避免 Agent 白推 WebRTC |
+
+**防御性**：所有可能在原生回调 / `Timer` / WS 回调里跑的路径（`onTrack`、`onIceCandidate`、
+`onConnectionState`、信令分发、`getStats` 轮询、`onFallback` 本身）都各自 try/catch，
+**不允许未捕获异常冒到 Zone 顶层**——那种表现是「没有崩溃但画面静默停住」，很难查。
 
 回落是单向的：一次会话内不再自动重试 WebRTC，需要点「重新连接」（避免和 Agent 的重协商互踢）。
 
@@ -248,16 +264,74 @@ macOS：沙盒必须开 `com.apple.security.network.client`（已在
 ```
 $ flutter pub get                     → +9 dependencies（flutter_webrtc 1.6.3 / dart_webrtc 1.8.2 ...）
 $ flutter analyze --fatal-infos       → No issues found!
-$ flutter test                        → 00:25 +22: All tests passed!
+$ flutter test                        → 00:12 +39: All tests passed!
 $ flutter build bundle                → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
 ```
 
 **没做**：`flutter build macos/android/ios`（本机无 Xcode / Android SDK），`flutter run` 真机运行，
-以及一次真实的 H.264 端到端联调（需要 Agent + 服务端在跑）。平台构建请交给 CI（见下一节）。
+一次真实的 H.264 端到端联调（需要 Agent + 服务端在跑），以及真 `uu-agent` 的子进程拉起
+（用 `/bin/sh` 假 agent 覆盖了生命周期，见 `test/agent_host_test.dart`）。平台构建请交给 CI（见第 8 节）。
 
 ---
 
-## 6. 已知限制
+## 6. 内置被控端（桌面端）
+
+Electron 版废弃后，**Flutter 客户端自己也要能被控**：登录成功后把随包分发的 `uu-agent`
+作为子进程拉起来。实现见 `lib/core/agent_host.dart`，设置页开关在「我的 → 允许其他设备控制本机」。
+
+### 6.1 生命周期
+
+| 时机 | 行为 |
+|---|---|
+| 冷启动已有会话 | `main()` 里 `AgentHost.instance.syncSession()` |
+| 登录成功 | 同上（`login_page.dart`） |
+| 退出登录 | 先 `stop()` 再清会话（token 失效后 Agent 会一直重试登录，日志很吵） |
+| 关开关 | `stop()`：SIGTERM，3s 不退则 SIGKILL |
+| 改服务器地址 | `syncSession(force: true)`：地址是启动参数，必须重起 |
+| 进程异常退出 | 让 Agent 自己退出的情况很少（它内部有 5s 重连循环），真挂了 → `restarting` → **5s 后重起** |
+
+### 6.2 为什么不会顶号
+
+启动参数是 `--server <base> --token <页面登录 token> --name <hostname> --insecure`
+（`buildAgentArgs()`）。Agent 侧 `args.token` 分支只调 `/api/v1/user/info` 校验 token，
+**不会**再走 `login/by_mobile`，所以不会顶掉控制端的登录态（见 `agent/agent.py` 的 `run()`）。
+
+`--insecure` 与 `ApiClient` / `SignalingClient` 的 `badCertificateCallback` 对齐：自签证书的
+自托管服务端不跳校验会被 TLS 拦死。正式版要和客户端一起改成证书固定。
+
+### 6.3 进程查找顺序（找不到就提示「被控端未随包分发」）
+
+| 平台 | 位置 |
+|---|---|
+| macOS | `<X.app>/Contents/Resources/agent/uu-agent` |
+| Windows | 可执行文件同目录 `<dir>\uu-agent.exe`（兼容 `<dir>\agent\uu-agent.exe`） |
+| Linux | `<bundle>/data/flutter_assets/agent/uu-agent` |
+
+**打包这一步还没接**：目前仓库里没有 `uu-agent` 产物，直接跑会显示「被控端未随包分发」
+（这是预期行为，不是 bug）。需要 release 流程把 pyinstaller 编出来的可执行文件拷到上表位置，
+macOS 还要 `chmod +x` 并随包签名（否则 Gatekeeper 会拦下子进程）。
+
+调试时不必等打包：
+
+```bash
+UU_AGENT_BIN=/path/to/uu-agent flutter run -d macos
+```
+
+### 6.4 移动端不做被控
+
+Android/iOS 系统层面不允许后台抓屏 + 全局输入注入，所以移动端只做控制端：
+`AgentHost.isDesktopPlatform == false` → 状态恒为 `unsupported`，开关置灰。
+
+### 6.5 日志
+
+Agent 的 stdout/stderr 按行转发到 `debugPrint`，前缀 `[uu-agent]` / `[uu-agent:err]`；
+错误行同时落到设置页的状态副标题，用户能看到「为什么没起来」。
+`flutter run` 时直接在控制台可见；release 版看系统日志（macOS `log stream`、Windows 事件查看器 /
+`flutter run` 附终端）。
+
+---
+
+## 7. 已知限制
 
 1. **JPEG 通路是兜底方案**：`Image.memory` 每帧解码 + 上传纹理，1080p@30 时 CPU/GPU 占用高、
    有 1 帧级抖动。WebRTC 可用时不会走这条路。
@@ -265,7 +339,8 @@ $ flutter build bundle                → 成功（kernel_blob.bin + flutter_ass
    但 SDP 协商、TURN 兜底、`connectionState` 回落需要 Agent + 服务端在跑才能验证；
    首次真机验证建议先看 HUD 的 fps 是否 > 0、分辨率是否等于档位宽度。
 3. **`jitterBufferTarget = 0` 未实现**：`flutter_webrtc` 未暴露该参数（协议 §3 建议项），
-   延迟目前靠 `playout-delay` 默认值 + 低抖动网络；要强制需改插件或改 SDP。
+   **抖动缓冲由插件默认策略控制，未压到 0，实测缓冲 20–50ms**；延迟目前靠 `playout-delay`
+   默认值 + 低抖动网络，要强制需改插件或改 SDP。
 4. **`degradationPreference` 是 best-effort**：recvonly sender 无 SSRC，部分平台 `setParameters` 返回 false
    （已忽略）。清晰度实际由被控端码率/策略决定，本端只保证不缩放。
 5. **没有自动重连**：WS 掉线后需点右上角「重新连接」（骨架期故意不做退避重试，避免掩盖问题）；
@@ -277,11 +352,15 @@ $ flutter build bundle                → 成功（kernel_blob.bin + flutter_ass
    若内网必须走明文，需在 `AndroidManifest.xml` 加网络明文策略（不推荐）。
 9. **v2 能力未实现**：音频、剪贴板同步、多屏切换、修饰键状态机只留了挂点与 TODO 注释
    （见 `webrtc_transport.dart` 末尾的表格）。
-10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 7 节）。
+10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 8 节）。
+11. **`uu-agent` 产物还没随包**：桌面端被控开关会显示「被控端未随包分发」，需要 release 流程
+    把 pyinstaller 产物拷到 6.3 的三个路径（macOS 还要签名）。生命周期与路径查找已用假 agent
+    单测覆盖（`test/agent_host_test.dart` 真起 `/bin/sh`），但没跑过真 uu-agent 端到端。
+12. **被控端只随 App 生活周期**：App 退出 = 停止被控；没有做成开机自启的系统服务。
 
 ---
 
-## 7. CI 构建（已落地在 `.github/workflows/build.yml`）
+## 8. CI 构建（已落地在 `.github/workflows/build.yml`）
 
 > 该 workflow 由 `ci-packager` 维护，本目录只写说明，不改 `.github/`。
 > **注意路径基准**：仓库根目录就是 `remote-desktop/`，所以 job 里的
@@ -325,6 +404,11 @@ flutter build bundle     # Dart 全量编译，但不出安装包
     仍是几十秒级。
 - `window_manager` 只声明 macOS/Windows/Linux 平台，Android/iOS 上不注册，代码里已用 `Platform.is*`
   保护，`build apk` 不受影响。
-- `flutter test` 现在 22 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
-  `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ UI 组件；仍没有 widget/集成测试
+- **桌面产物要带上 `uu-agent`**（见 6.3 的三个路径），否则 App 能跑但「允许被控」是灰的：
+  macOS 打进 `Contents/Resources/agent/` 并签名，Windows 放 exe 同目录，Linux 放
+  `bundle/data/flutter_assets/agent/`。CI 目前不构建 Agent，需要 release 流程补一步拷贝；
+  `flutter build bundle` 不含它（也没法含，二进制由 pyinstaller 产出）。
+- `flutter test` 现在 39 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
+  `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ 被控端路径/参数/进程生命周期
+  （`test/agent_host_test.dart`，真起 `/bin/sh` 假 agent）+ UI 组件；仍没有 widget/集成测试
   （需要真机或模拟器，且 WebRTC 必须有 Agent 在对面）。

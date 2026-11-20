@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
+import '../core/agent_host.dart';
 import '../core/api_client.dart';
 import '../core/device_identity.dart';
 import '../core/settings.dart';
@@ -67,6 +70,8 @@ class _LoginPageState extends State<LoginPage> {
         deviceId: result.deviceId,
       );
       if (!mounted) return;
+      // 登录成功 → 拉起内置被控端（桌面端），让本机立即可被控制
+      unawaited(AgentHost.instance.syncSession());
       Navigator.of(context).pushReplacement(
         MaterialPageRoute<void>(builder: (_) => const DeviceListPage()),
       );

@@ -87,6 +87,17 @@ class WebRtcTransport implements MediaTransport {
     _signaling = signaling;
     _signalSub = signaling.messages.listen(_onSignal);
 
+    // 建 PC / 加 transceiver / setLocal 任何一步失败都**不往外抛**：
+    // 统一记成 fallbackReason，页面 start() 返回后补查并切 JPEG（协议 §5）。
+    try {
+      await _openSession(room);
+    } catch (e, stack) {
+      debugPrint('[webrtc] 初始化失败：$e\n$stack');
+      _notifyFallback('初始化失败：$e');
+    }
+  }
+
+  Future<void> _openSession(RoomConfig room) async {
     final RTCVideoRenderer renderer = RTCVideoRenderer();
     await renderer.initialize();
     _renderer = renderer;
@@ -107,34 +118,33 @@ class WebRtcTransport implements MediaTransport {
     await _preferMaintainResolution(transceiver);
 
     pc.onTrack = (RTCTrackEvent event) {
-      if (event.track.kind == 'audio') {
-        // TODO(v2-audio): 协议 v2 §1 —— 挂到页面隐藏的音频元素/播放器，静音只改
-        // 本地音量，不通知 Agent。v1 不实现，收到 audio 轨直接忽略。
-        return;
-      }
-      final List<MediaStream> streams = event.streams;
-      if (streams.isEmpty) {
-        debugPrint('[webrtc] onTrack 未带 stream，无法渲染');
-        return;
-      }
-      renderer.srcObject = streams.first;
+      // 回调是原生的同步回调：不能抛，异步部分全部收进 _attachRemoteTrack
+      unawaited(_attachRemoteTrack(event, renderer));
     };
     pc.onIceCandidate = (RTCIceCandidate candidate) {
-      final String? value = candidate.candidate;
-      if (value == null || value.isEmpty) return;
-      _send(buildRtcIceMessage(
-        candidate: value,
-        sdpMid: candidate.sdpMid,
-        sdpMLineIndex: candidate.sdpMLineIndex,
-        peer: _peer,
-      ));
+      try {
+        final String? value = candidate.candidate;
+        if (value == null || value.isEmpty) return;
+        _send(buildRtcIceMessage(
+          candidate: value,
+          sdpMid: candidate.sdpMid,
+          sdpMLineIndex: candidate.sdpMLineIndex,
+          peer: _peer,
+        ));
+      } catch (e) {
+        debugPrint('[webrtc] 上报本地候选失败：$e');
+      }
     };
     pc.onConnectionState = (RTCPeerConnectionState state) {
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _notifyFallback(state == RTCPeerConnectionState.RTCPeerConnectionStateFailed
-            ? '连接失败'
-            : '连接断开');
+      try {
+        if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+            state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+          _notifyFallback(state == RTCPeerConnectionState.RTCPeerConnectionStateFailed
+              ? '连接失败'
+              : '连接断开');
+        }
+      } catch (e) {
+        debugPrint('[webrtc] 连接状态处理失败：$e');
       }
     };
     // TODO(v2-multiscreen): 协议 v2 §3 —— 切换显示器时 Agent 会重建视频轨并主动
@@ -149,23 +159,58 @@ class WebRtcTransport implements MediaTransport {
       peer: _peer,
     ));
 
-    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollStats());
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(_pollStats());
+    });
   }
 
   // ------------------------------------------------------------ 信令
 
+  /// 把远端轨挂到渲染器。
+  ///
+  /// 少数实现（如 aiortc 未带 msid）`event.streams` 是空的；直接丢掉会表现成
+  /// **协商成功但永远没有帧**（HUD 有分辨率、fps 一直是 —）。这里自建一个容器
+  /// MediaStream 把轨塞进去，纯客户端行为，不改协议。
+  Future<void> _attachRemoteTrack(RTCTrackEvent event, RTCVideoRenderer renderer) async {
+    try {
+      if (event.track.kind == 'audio') {
+        // TODO(v2-audio): 协议 v2 §1 —— 挂到页面隐藏的音频元素/播放器，静音只改
+        // 本地音量，不通知 Agent。v1 不实现，收到 audio 轨直接忽略。
+        return;
+      }
+      MediaStream? stream = event.streams.isNotEmpty ? event.streams.first : null;
+      if (stream == null) {
+        debugPrint('[webrtc] onTrack 未带 stream，自建 MediaStream 挂载');
+        stream = await createLocalMediaStream('remote-${event.track.id}');
+        await stream.addTrack(event.track);
+      }
+      if (_disposed) return;
+      renderer.srcObject = stream;
+    } catch (e) {
+      debugPrint('[webrtc] 挂载远端轨失败：$e');
+      _notifyFallback('渲染远端视频失败');
+    }
+  }
+
   void _onSignal(Map<String, dynamic> message) {
     if (_disposed) return;
-    switch (message['p']) {
-      case 'rtc.answer':
-        _onAnswer(message);
-      case 'rtc.ice':
-        _onRemoteCandidate(message);
-      case 'rtc.close':
-        // 对端主动收线（离开房间/降级）：按断开处理，页面回落 JPEG
-        _notifyFallback('对端关闭了 H.264 通路');
-      default:
-        break;
+    // 信令回调是 WS 流上的同步回调：这里任何异常都会冒到 Zone 顶层（无 UI 提示、
+    // 表现为静默断流），所以整段兜住，异步部分再各自 try。
+    try {
+      switch (message['p']) {
+        case 'rtc.answer':
+          unawaited(_onAnswer(message));
+        case 'rtc.ice':
+          unawaited(_onRemoteCandidate(message));
+        case 'rtc.close':
+          // 对端主动收线（离开房间/降级）：按断开处理，页面回落 JPEG
+          _notifyFallback('对端关闭了 H.264 通路');
+        default:
+          break;
+      }
+    } catch (e) {
+      debugPrint('[webrtc] 信令处理失败：$e');
+      _notifyFallback('信令处理失败');
     }
   }
 
@@ -179,7 +224,12 @@ class WebRtcTransport implements MediaTransport {
       final List<RTCIceCandidate> pending = List<RTCIceCandidate>.of(_pendingCandidates);
       _pendingCandidates.clear();
       for (final RTCIceCandidate candidate in pending) {
-        await pc.addCandidate(candidate);
+        // 单条候选失败不该让整次协商作废（协议 §2.3：候选冲突很常见）
+        try {
+          await pc.addCandidate(candidate);
+        } catch (e) {
+          debugPrint('[webrtc] 补投候选失败（忽略）：$e');
+        }
       }
     } catch (e) {
       debugPrint('[webrtc] setRemoteDescription 失败：$e');
@@ -191,16 +241,16 @@ class WebRtcTransport implements MediaTransport {
     final RTCPeerConnection? pc = _pc;
     final RtcIcePayload? payload = RtcIcePayload.fromJson(message);
     if (pc == null || payload == null) return;
-    final RTCIceCandidate candidate = RTCIceCandidate(
-      payload.candidate,
-      payload.sdpMid,
-      payload.sdpMLineIndex,
-    );
-    if (!_remoteDescriptionSet) {
-      _pendingCandidates.add(candidate);
-      return;
-    }
     try {
+      final RTCIceCandidate candidate = RTCIceCandidate(
+        payload.candidate,
+        payload.sdpMid,
+        payload.sdpMLineIndex,
+      );
+      if (!_remoteDescriptionSet) {
+        _pendingCandidates.add(candidate);
+        return;
+      }
       await pc.addCandidate(candidate);
     } catch (e) {
       // 候选冲突/过期很常见，忽略即可，媒体链路会自己收敛
@@ -237,23 +287,26 @@ class WebRtcTransport implements MediaTransport {
   Future<void> _pollStats() async {
     final RTCPeerConnection? pc = _pc;
     if (pc == null || _disposed) return;
-    List<StatsReport> reports;
     try {
-      reports = await pc.getStats();
-    } catch (_) {
-      return;
-    }
-    for (final StatsReport report in reports) {
-      if (report.type != 'inbound-rtp') continue;
-      final Map<dynamic, dynamic> values = report.values;
-      final String kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
-      if (kind != 'video') continue;
-      _updateStats(values);
-      return;
+      final List<StatsReport> reports = await pc.getStats();
+      for (final StatsReport report in reports) {
+        if (report.type != 'inbound-rtp') continue;
+        final Map<dynamic, dynamic> values = report.values;
+        final String kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
+        if (kind != 'video') continue;
+        _updateStats(values);
+        return;
+      }
+    } catch (e) {
+      // 计时器回调里抛异常 = Zone 顶层未捕获，这里必须吃掉
+      debugPrint('[webrtc] getStats 失败（本轮跳过）：$e');
     }
   }
 
   /// 字段名各平台略有差异（`framesPerSecond` vs 自算 `framesDecoded` 差值），两种都试。
+  ///
+  /// `fps == null` 表示**还没收到过任何帧**（HUD 显示 `—`）；一旦收到过帧，后续
+  /// 掉到 0 就是真的卡住，如实显示 `0 fps`。
   void _updateStats(Map<dynamic, dynamic> values) {
     final int width = _asInt(values['frameWidth']);
     final int height = _asInt(values['frameHeight']);
@@ -272,7 +325,11 @@ class WebRtcTransport implements MediaTransport {
     }
     if (fps < 0) fps = 0;
 
-    _stats.value = TransportStats(fps: fps, width: width, height: height);
+    _stats.value = TransportStats(
+      fps: frames > 0 ? fps : null,
+      width: width,
+      height: height,
+    );
   }
 
   static int _asInt(Object? v) {
@@ -287,7 +344,12 @@ class WebRtcTransport implements MediaTransport {
     if (_disposed || _fallbackNotified) return;
     _fallbackNotified = true;
     _fallbackReason = reason;
-    onFallback?.call(reason);
+    // 回调是页面代码（异步回落）：它自己抛异常不能反向炸穿原生回调/计时器
+    try {
+      onFallback?.call(reason);
+    } catch (e) {
+      debugPrint('[webrtc] onFallback 回调失败：$e');
+    }
   }
 
   // ------------------------------------------------------------ 视图

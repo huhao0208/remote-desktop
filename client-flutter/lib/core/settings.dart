@@ -19,6 +19,7 @@ class Settings {
   static const String _kUuid = 'device_uuid';
   static const String _kDeviceId = 'device_id';
   static const String _kQuality = 'quality_preset';
+  static const String _kAllowBeControlled = 'allow_be_controlled';
 
   static late SharedPreferences _prefs;
 
@@ -83,6 +84,12 @@ class Settings {
 
   static String get qualityValue => _prefs.getString(_kQuality) ?? '';
   static Future<void> setQualityValue(String value) => _prefs.setString(_kQuality, value);
+
+  /// 「允许其他设备控制本机」：默认开（登录即启动被控端），用户可关。
+  static bool get allowBeControlled => _prefs.getBool(_kAllowBeControlled) ?? true;
+
+  static Future<void> setAllowBeControlled(bool value) =>
+      _prefs.setBool(_kAllowBeControlled, value);
 
   static bool get hasSession => token.isNotEmpty && deviceId.isNotEmpty;
 

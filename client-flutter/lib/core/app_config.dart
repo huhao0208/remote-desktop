@@ -2,8 +2,16 @@
 class AppConfig {
   AppConfig._();
 
+  /// 编译期覆盖：`flutter run --dart-define=UU_SERVER=https://host:8444`。
+  ///
+  /// 本地联调时不用去改 shared_preferences（沙盒/新装环境下很难验），直接钉死服务端。
+  static const String _envServer = String.fromEnvironment('UU_SERVER');
+
   /// 自托管服务端默认地址。内置常量，可在登录页/设备列表的「设置」里修改。
-  static const String defaultServer = 'https://47-251-105-202.sslip.io:8444';
+  ///
+  /// 优先级：`--dart-define=UU_SERVER` > 内置常量 > 用户保存的地址（见 `Settings.serverBase`）。
+  static const String defaultServer =
+      _envServer == '' ? 'https://47-251-105-202.sslip.io:8444' : _envServer;
 
   /// 画质档位：value = `width,quality,bitrate`，见 docs/media-protocol.md §4。
   static const List<QualityPreset> qualityPresets = <QualityPreset>[

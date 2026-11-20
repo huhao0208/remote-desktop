@@ -22,9 +22,11 @@ class FramePacket {
 /// JPEG 通路的 fps 由页面自己数帧；WebRTC 没有帧流（画面在原生纹理里），只能读
 /// `pc.getStats()` 的 `inbound-rtp`，所以统一从这个结构体出。
 class TransportStats {
-  const TransportStats({this.fps = 0, this.width = 0, this.height = 0});
+  const TransportStats({this.fps, this.width = 0, this.height = 0});
 
-  final int fps;
+  /// `null` = 还没统计到（尚未收到首帧）→ HUD 显示 `—`，不要显示 `0 fps`
+  /// 让人误判成「卡住」。
+  final int? fps;
 
   /// 解码后的实际画面尺寸（协议 §7：必须等于 `stream.config.width`，不因带宽缩）
   final int width;

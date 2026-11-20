@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 
+import 'core/agent_host.dart';
 import 'core/settings.dart';
 import 'core/theme.dart';
 import 'core/window_setup.dart';
@@ -11,6 +14,8 @@ Future<void> main() async {
   await Settings.init();
   await setupDesktopWindow();
   runApp(const UuRemoteApp());
+  // 冷启动带会话 → 顺手把内置被控端拉起来（桌面端才有；移动端是 unsupported）
+  if (Settings.hasSession) unawaited(AgentHost.instance.syncSession());
 }
 
 class UuRemoteApp extends StatelessWidget {
