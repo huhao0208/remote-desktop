@@ -30,63 +30,161 @@ import mss
 import websockets
 from PIL import Image
 
+try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.agent）都要能用
+    from .clipboard_sync import ClipboardSync
+except ImportError:
+    from clipboard_sync import ClipboardSync
+
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
 
 
+def _new_mss():
+    """mss 10 起 mss.mss() 被弃用（会往日志里刷 DeprecationWarning）。"""
+    return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+
+
 # ---------------------------------------------------------------- 输入注入
 
+# 协议里的修饰键名（cmd/command/meta/super/win/winleft...）归一到 pyautogui 键名
+_PYAGUI_MODS = {"shift", "ctrl", "alt", "command", "win", "winleft", "winright", "super"}
+
+
+def _norm_key(k: str) -> str:
+    low = k.strip().lower()
+    if low in ("cmd", "command", "meta", "super", "win", "windows", "winleft", "winright"):
+        if SYSTEM == "Darwin":  # 控制页可能发 winleft，mac 上是 Command
+            return "command"
+        if SYSTEM == "Windows":
+            return "winright" if low == "winright" else "winleft"
+        return "super"
+    if low in ("ctrl", "control"):
+        return "ctrl"
+    if low in ("alt", "option"):
+        return "alt"
+    if low == "shift":
+        return "shift"
+    return k
+
+
 def _init_input():
-    """按平台初始化输入后端；返回 inject(event) 函数。"""
+    """按平台初始化输入后端；返回 (inject, (w,h), release_all)。
+
+    修饰键状态机（协议 v2 §4）：`keydown/keyup` 只对 shift/ctrl/alt/cmd 保持
+    按住（远端按 Shift 多选、Ctrl+滚轮都靠这个）；其它键一律原子按下+抬起。
+    `release_all` 用于 WS 断开/失焦，避免远端卡住 Shift。
+    """
     import pyautogui
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0
     sw, sh = pyautogui.size()
+    pressed: set[str] = set()  # 当前被按住的修饰键（pyautogui 键名）
+
+    def _hold(mods) -> list[str]:
+        """按下尚未按住的修饰键，返回本次临时按下的（动作结束要松开）。"""
+        held: list[str] = []
+        for m in mods or ():
+            key = _norm_key(str(m))
+            if key in _PYAGUI_MODS and key not in pressed:
+                try:
+                    pyautogui.keyDown(key)
+                except Exception:  # 平台不认这个键名（如 macOS 的 winleft）
+                    continue
+                pressed.add(key)
+                held.append(key)
+        return held
+
+    def _release(keys: list[str]) -> None:
+        for key in keys:
+            try:
+                pyautogui.keyUp(key)
+            except Exception:
+                pass
+            pressed.discard(key)
+
+    def release_all() -> None:
+        _release(list(pressed))
+
+    def _combo(keys: list[str]) -> None:
+        """原子组合键（按下→抬起整段）。已在按住的修饰键不重复按：
+        否则 hotkey 结尾的 keyUp 会把用户正按着的 Shift 松掉。"""
+        seq = [_norm_key(str(c)) for c in keys]
+        if not seq:
+            return
+        extra = [k for k in seq[:-1] if k in _PYAGUI_MODS and k not in pressed]
+        pyautogui.hotkey(*extra, seq[-1])
 
     def inject(ev: dict) -> None:
         t = ev.get("t")
+        mods = [str(m) for m in (ev.get("mods") or ())]
         # 坐标：控制页发归一化 0..1，映射到真实分辨率
         if "x" in ev and "y" in ev:
             x = int(float(ev["x"]) * sw)
             y = int(float(ev["y"]) * sh)
-        if t == "move":
-            pyautogui.moveTo(x, y)
-        elif t == "down":
-            pyautogui.mouseDown(x, y, button=ev.get("btn", "left"))
-        elif t == "up":
-            pyautogui.mouseUp(x, y, button=ev.get("btn", "left"))
-        elif t == "click":
-            pyautogui.click(x, y, clicks=2 if ev.get("double") else 1,
-                            button=ev.get("btn", "left"))
-        elif t == "scroll":
-            pyautogui.scroll(int(ev.get("dy", 0)))
-        elif t == "key":
-            # ev.k: 单键名（pyautogui 命名）；ev.combo: ["ctrl","c"]
-            combo = ev.get("combo")
-            if combo:
-                pyautogui.hotkey(*combo)
-            elif ev.get("k"):
-                pyautogui.press(ev["k"])
-        elif t in ("keydown", "keyup"):
-            # 修饰键独立按住/抬起（按住 Shift 点选、按住 Ctrl 滚轮等）
+        if t == "press":
+            # 带 mods 的单键 = 组合键：一次性按下再抬起
             k = str(ev.get("k", ""))
-            if k:
-                (pyautogui.keyDown if t == "keydown" else pyautogui.keyUp)(k)
-        elif t == "press":
-            k = str(ev.get("k", ""))
-            if k:
-                try:
-                    pyautogui.press(k)
-                except (KeyError, ValueError):
-                    if len(k) == 1:  # pyautogui 不认识的字符退回文本粘贴
-                        _paste_text(k)
+            if not k:
+                return
+            if mods:
+                _combo(mods + [k])
+                return
+            try:
+                pyautogui.press(_norm_key(k))
+            except (KeyError, ValueError):
+                if len(k) == 1:  # pyautogui 不认识的字符退回文本粘贴
+                    _paste_text(k)
+                else:
+                    raise
+            return
+        # 事件自带的 mods 若尚未按住（控制端没发过 keydown），临时按住再用，
+        # 让「Ctrl+滚轮缩放」「Shift+点击多选」成立；动作结束按相反顺序释放
+        tmp = _hold(mods)
+        try:
+            if t == "move":
+                pyautogui.moveTo(x, y)
+            elif t == "down":
+                pyautogui.mouseDown(x, y, button=ev.get("btn", "left"))
+            elif t == "up":
+                pyautogui.mouseUp(x, y, button=ev.get("btn", "left"))
+            elif t == "click":
+                pyautogui.click(x, y, clicks=2 if ev.get("double") else 1,
+                                button=ev.get("btn", "left"))
+            elif t == "scroll":
+                pyautogui.scroll(int(ev.get("dy", 0)))
+            elif t == "keydown":
+                k = str(ev.get("k", ""))
+                if k:
+                    key = _norm_key(k)
+                    if key in _PYAGUI_MODS:
+                        if key not in pressed:  # 保持按住，等 keyup
+                            pyautogui.keyDown(key)
+                            pressed.add(key)
                     else:
-                        raise
-        elif t == "text":
-            # 中文/任意文本走剪贴板粘贴，避免 typewrite 不支持非 ASCII
-            _paste_text(str(ev.get("v", "")))
+                        pyautogui.press(key)  # 非修饰键：原子按下+抬起
+            elif t == "keyup":
+                k = str(ev.get("k", ""))
+                if k:
+                    key = _norm_key(k)
+                    if key in pressed or key in _PYAGUI_MODS:
+                        _release([key])
+            elif t == "key":
+                # ev.k: 单键名（pyautogui 命名）；ev.combo: ["ctrl","c"]
+                combo = ev.get("combo")
+                k = str(ev.get("k", ""))
+                if combo:
+                    _combo([str(c) for c in combo])
+                elif k and mods:
+                    _combo(mods + [k])
+                elif k:
+                    pyautogui.press(_norm_key(k))
+            elif t == "text":
+                # 中文/任意文本走剪贴板粘贴，避免 typewrite 不支持非 ASCII
+                _paste_text(str(ev.get("v", "")))
+        finally:
+            _release(tmp[::-1])  # 反向释放：后按下的先抬起
 
-    return inject, (sw, sh)
+    return inject, (sw, sh), release_all
 
 
 def _paste_text(text: str) -> None:
@@ -101,6 +199,45 @@ def _paste_text(text: str) -> None:
         pyautogui.hotkey("command", "v")
     else:
         pyautogui.typewrite(text)  # Linux 尽力而为
+
+
+# ---------------------------------------------------------------- 多显示器
+
+def _screen_names(count: int) -> tuple[list[str], int]:
+    """显示器名字与主屏下标（macOS 走 NSScreen，其它平台用通用名）。"""
+    names = [f"显示器 {i + 1}" for i in range(count)]
+    primary = 0
+    if SYSTEM == "Darwin":
+        try:
+            from AppKit import NSScreen
+
+            screens = list(NSScreen.screens())
+            if len(screens) == count:  # 数量对不上就不猜，避免张冠李戴
+                names = [str(s.localizedName()) for s in screens]
+                primary = 0  # NSScreen.screens()[0] 即含菜单栏的主屏
+        except Exception:
+            pass
+    return names, primary
+
+
+def list_screens() -> list[dict]:
+    """枚举显示器；下标即协议里的 `screens.list[].id`（= mss.monitors[1:] 顺序）。"""
+    try:
+        with _new_mss() as sct:
+            mons = list(sct.monitors[1:])
+    except Exception as e:
+        print(f"[agent] 枚举显示器失败: {e}", flush=True)
+        return []
+    names, primary = _screen_names(len(mons))
+    return [{
+        "id": i,
+        "w": int(m["width"]),
+        "h": int(m["height"]),
+        "x": int(m["left"]),
+        "y": int(m["top"]),
+        "name": names[i],
+        "primary": i == primary,
+    } for i, m in enumerate(mons)]
 
 
 # ---------------------------------------------------------------- 关机（可撤销）
@@ -198,7 +335,11 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         print(f"[agent] device={device_id} room={cfg['room_id']}", flush=True)
         print(f"[agent] 手机打开 {args.server}/control 登录同一手机号即可控制", flush=True)
 
-    inject, (sw, sh) = _init_input()
+    inject, (sw, sh), release_all = _init_input()
+    screens = list_screens()
+    cur_screen = 0
+    if screens:  # hello.screen 用真实主屏尺寸（pyautogui.size 在多屏下不一定准）
+        sw, sh = screens[0]["w"], screens[0]["h"]
     # 信令地址跟随 --server 实际 scheme（调试时可能是 http/ws）
     ws_base = args.server.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
     ws_url = ws_base + "/ws/signaling" + f"?token={cfg['token']}&device_id={device_id}"
@@ -220,12 +361,16 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
 
         # 运行时画质参数（控制页 stream.config 可动态调，无需重启 Agent）
         stream_cfg = {"fps": args.fps, "quality": args.quality, "width": args.width}
+        capture_mon = [0]  # JPEG 兜底通路当前抓的显示器（screen.select 时改）
 
         # WebRTC 媒体（首选）：H.264 + SRTP/UDP，信令仍走本 WS
         rtc = None
         if args.transport in ("webrtc", "both"):
             try:
-                from webrtc_media import WebRTCMedia
+                try:
+                    from .webrtc_media import WebRTCMedia
+                except ImportError:
+                    from webrtc_media import WebRTCMedia
 
                 def _on_rtc_state(state: str) -> None:
                     # WebRTC 连上后暂停 JPEG 推流（省 CPU/带宽）；断开则自动恢复兜底
@@ -240,27 +385,47 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                     fps=min(30, args.fps),
                     bitrate_kbps=args.bitrate,
                     on_state=_on_rtc_state,
+                    audio=not args.no_audio,
+                    audio_device=args.audio_device,
+                    monitor=cur_screen,
+                    screen_count=max(1, len(screens)),
                 )
             except Exception as e:  # aiortc 未安装等 → 自动退回 JPEG
                 print(f"[agent] WebRTC 不可用（{e}），退回 JPEG 推流", flush=True)
                 rtc = None
 
         media_kind = "webrtc" if rtc else "jpeg"
-        await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
-                         "screen": {"w": sw, "h": sh}, "media": media_kind,
-                         "stream": dict(stream_cfg)})
+        audio_ok = bool(rtc and rtc.audio_ok)
+        print(f"[agent] media={media_kind} audio={'on' if audio_ok else 'off'} "
+              f"screens={len(screens)}", flush=True)
+
+        # 剪贴板同步（轮询在后台，未 enable 时只空转）
+        clips = ClipboardSync(send_json=send_json, log=print)
+        clips.start()
+
+        async def send_hello() -> None:
+            scr = {"w": sw, "h": sh}
+            if screens:
+                scr = {"w": screens[cur_screen]["w"], "h": screens[cur_screen]["h"]}
+            await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
+                             "screen": scr, "media": media_kind,
+                             "audio": audio_ok, "screens": len(screens),
+                             "stream": dict(stream_cfg)})
+            if screens:
+                await send_json({"p": "screens", "current": cur_screen, "list": screens})
+
+        await send_hello()
 
         async def rx() -> None:
+            nonlocal cur_screen
             async for raw in ws:
                 if isinstance(raw, bytes):
                     continue  # Agent 不消费对端二进制
                 ev = json.loads(raw)
                 p = ev.get("p", "")
                 if p == "peer.join":
-                    # 新控制端进房：重发 hello（对方可能错过首次广播）
-                    await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
-                                     "screen": {"w": sw, "h": sh}, "media": media_kind,
-                                     "stream": dict(stream_cfg)})
+                    # 新控制端进房：重发 hello（对方可能错过首次广播）+ 能力声明
+                    await send_hello()
                     continue
                 try:
                     if p == "rtc.offer" and rtc:
@@ -275,6 +440,25 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                         streaming.set()
                     elif p == "input":
                         inject(ev)
+                    elif p == "screen.select":
+                        idx = int(ev.get("id", 0))
+                        if 0 <= idx < len(screens):
+                            cur_screen = idx
+                            capture_mon[0] = idx
+                            if rtc:
+                                await rtc.select_screen(idx)
+                            await send_json({"p": "screen.selected", "id": idx})
+                        else:
+                            await send_json({"p": "agent.error", "err": f"无效屏幕 {idx}"})
+                    elif p == "clip":
+                        if ev.get("dir") == "up":
+                            await asyncio.to_thread(clips.apply_up, str(ev.get("text", "")))
+                    elif p == "clip.sync":
+                        clips.set_enabled(bool(ev.get("enable")))
+                    elif p == "view.only":
+                        # 只观看时清掉按住的修饰键，避免远端卡住 Shift
+                        if ev.get("enable"):
+                            release_all()
                     elif p == "shutdown":
                         await handle_shutdown(ev, send_json)
                     elif p == "stream.pause":
@@ -293,6 +477,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                                            bitrate_kbps=ev.get("bitrate"))
                         await send_json({"p": "stream.config.ack", **stream_cfg,
                                          "media": media_kind,
+                                         "audio": audio_ok,
                                          "bitrate": rtc.bitrate_bps // 1000 if rtc else 0})
                     elif p == "ping":
                         await send_json({"p": "pong", "ts": ev.get("ts")})
@@ -310,8 +495,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             def capture_loop() -> None:
                 import hashlib
                 last_hash = None
-                with mss.mss() as sct:
-                    mon = sct.monitors[1]
+                with _new_mss() as sct:
                     while not stop.is_set():
                         # WebRTC 连上后 streaming 会被清掉：此时必须彻底停止抓屏，
                         # 否则会和 WebRTC 抢同一个屏幕采集通道（macOS 上表现为
@@ -322,6 +506,8 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                         t0 = time.monotonic()
                         interval = 1.0 / stream_cfg["fps"]
                         try:
+                            idx = capture_mon[0] + 1
+                            mon = sct.monitors[idx] if idx < len(sct.monitors) else sct.monitors[1]
                             shot = sct.grab(mon)
                             img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
                             w = stream_cfg["width"]
@@ -376,6 +562,9 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         try:
             await asyncio.gather(rx(), tx())
         finally:
+            # 断链必须松开所有修饰键 + 停剪贴板轮询，否则重连后远端卡 Shift
+            release_all()
+            await clips.stop()
             if rtc:
                 await rtc.close()  # 断链时释放 PC，避免重连后重复协商
 
@@ -396,6 +585,9 @@ def main() -> int:
                     help="媒体传输：webrtc(默认，H.264/UDP，aiortc 缺失时自动退回 jpeg) / jpeg / both")
     ap.add_argument("--bitrate", type=int, default=8000,
                     help="WebRTC 目标码率 kbps（默认 8000；1080p 屏幕 8M 约 45dB PSNR）")
+    ap.add_argument("--no-audio", action="store_true", help="关闭音频采集（默认开）")
+    ap.add_argument("--audio-device", default=None,
+                    help="音频输入设备名/序号（系统内录需指向 BlackHole 等虚拟声卡）")
     ap.add_argument("--insecure", action="store_true", help="跳过证书校验（自签调试）")
     args = ap.parse_args()
     if not args.mobile and not args.token:

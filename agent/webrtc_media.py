@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 import asyncio
+import fractions
 import threading
+import time
+from collections import deque
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import av
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
-from aiortc.mediastreams import VideoStreamTrack
+from aiortc.mediastreams import AudioStreamTrack, MediaStreamError, VideoStreamTrack
 
 from PIL import Image
 
@@ -33,14 +36,18 @@ class ScreenTrack(VideoStreamTrack):
 
     抓屏是阻塞调用（5–20ms），放到线程里跑，避免卡住 asyncio 事件循环；
     mss 实例按线程缓存（mss 不支持跨线程共享）。
+
+    `monitor` 是 `sct.monitors[1:]` 的下标（0 = 主屏），与 Agent 下发的
+    `screens.list[].id` 一一对应；多屏切换时整体重建本轨（分辨率变了）。
     """
 
     kind = "video"
 
-    def __init__(self, width: int = 1920, fps: int = 30) -> None:
+    def __init__(self, width: int = 1920, fps: int = 30, monitor: int = 0) -> None:
         super().__init__()
         self.max_width = max(640, int(width))
         self.fps = max(1, min(60, int(fps)))
+        self.monitor = max(0, int(monitor))
         self._tls = threading.local()
         self.frames = 0
 
@@ -49,9 +56,12 @@ class ScreenTrack(VideoStreamTrack):
 
         sct = getattr(self._tls, "sct", None)
         if sct is None:
-            sct = mss.mss()
+            sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
             self._tls.sct = sct
-        shot = sct.grab(sct.monitors[1])
+        mons = sct.monitors
+        # 显示器可能在运行中被拔掉：越界退回主屏，不让推流断
+        mon = mons[self.monitor + 1] if self.monitor + 1 < len(mons) else mons[1]
+        shot = sct.grab(mon)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         if img.width > self.max_width:
             h = max(2, int(img.height * self.max_width / img.width / 2) * 2)  # 偶数高度，H.264 要求
@@ -70,12 +80,111 @@ class ScreenTrack(VideoStreamTrack):
         return frame
 
 
+class MicTrack(AudioStreamTrack):
+    """系统默认输入设备 → WebRTC 音频轨（s16 单声道，交给 Opus 编码）。
+
+    采集用 sounddevice 的 RawInputStream 回调写环形缓冲（回调里只做 append，
+    不能阻塞）；recv() 按 20ms 一帧取，缓冲不足时补静音，保证时间戳连续。
+    设备打不开（未授权麦克风/被占用/无设备）时 `start()` 返回 False，
+    上层不挂轨并让 hello.audio=false，绝不因音频崩掉整条链路。
+
+    注：系统内录（采集「正在播放的声音」）需要 macOS 装 BlackHole 之类虚拟
+    声卡并把 `--audio-device` 指向它，首版仅支持输入设备。
+    """
+
+    kind = "audio"
+    SAMPLES = 960  # 20ms @ 48kHz
+
+    def __init__(self, rate: int = 48000, device: Optional[Any] = None) -> None:
+        super().__init__()
+        self.rate = int(rate or 48000)
+        self.device = device
+        self._chunks: deque = deque()
+        self._bytes = 0
+        self._lock = threading.Lock()
+        self._stream = None
+        self._pts = 0
+        self.frames = 0
+        self.dropped = 0
+        self._max_bytes = self.rate * 2 // 2  # 500ms 上限，超了丢最旧
+
+    def start(self) -> bool:
+        try:
+            import sounddevice as sd
+
+            def _cb(indata, frames, _t, status):  # noqa: ANN001
+                with self._lock:
+                    self._chunks.append(bytes(indata))
+                    self._bytes += len(indata)
+                    while self._bytes > self._max_bytes and self._chunks:
+                        self._bytes -= len(self._chunks.popleft())
+                        self.dropped += 1
+
+            self._stream = sd.RawInputStream(
+                samplerate=self.rate, channels=1, dtype="int16",
+                device=self.device, callback=_cb,
+            )
+            self._stream.start()
+            return True
+        except Exception:
+            self._stream = None
+            return False
+
+    def stop(self) -> None:
+        try:
+            if self._stream:
+                self._stream.stop()
+                self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+        super().stop()
+
+    def _take(self, need: int) -> bytes:
+        with self._lock:
+            if self._bytes < need:
+                return b""
+            data = b"".join(self._chunks)
+            self._chunks.clear()
+            self._bytes = 0
+            if len(data) > need:
+                self._chunks.append(data[need:])
+                self._bytes = len(data) - need
+            return data[:need]
+
+    async def recv(self) -> av.AudioFrame:
+        if self.readyState != "live":
+            raise MediaStreamError
+        need = self.SAMPLES * 2
+        if self._stream is None:
+            await asyncio.sleep(0.02)  # 无设备时仍按实时节奏出静音
+            data = b""
+        else:
+            data = self._take(need)
+            deadline = time.monotonic() + 0.03
+            while not data and time.monotonic() < deadline:
+                await asyncio.sleep(0.004)
+                data = self._take(need)
+        if len(data) < need:
+            data = data + b"\x00" * (need - len(data))
+
+        frame = av.AudioFrame(format="s16", layout="mono", samples=self.SAMPLES)
+        frame.planes[0].update(data)
+        frame.sample_rate = self.rate
+        frame.time_base = fractions.Fraction(1, self.rate)
+        frame.pts = self._pts
+        self._pts += self.SAMPLES
+        self.frames += 1
+        return frame
+
+
 class _Peer:
-    """一个控制端的会话（PC + 视频轨 + 码率看门狗）。"""
+    """一个控制端的会话（PC + 视频轨 + 音频轨 + 码率看门狗）。"""
 
     def __init__(self, pc: RTCPeerConnection, track: ScreenTrack) -> None:
         self.pc = pc
         self.track = track
+        self.mic: Optional[MicTrack] = None
         self.task: Optional[asyncio.Task] = None
         self.state = "new"
 
@@ -91,6 +200,10 @@ class WebRTCMedia:
         bitrate_kbps: int = 8000,
         on_state: Optional[Callable[[str], None]] = None,
         log: Callable[[str], None] = print,
+        audio: bool = True,
+        audio_device: Optional[Any] = None,
+        monitor: int = 0,
+        screen_count: int = 1,
     ) -> None:
         self._send_json = send_json
         self.width = width
@@ -99,8 +212,41 @@ class WebRTCMedia:
         self._on_state = on_state
         self._log = log
         self._peers: Dict[str, _Peer] = {}
+        self.monitor = max(0, int(monitor))
+        self.screen_count = max(1, int(screen_count))
+        self.enable_audio = bool(audio)
+        self.audio_device = audio_device
+        self.audio_rate = 48000
+        self.audio_ok = self._probe_audio() if self.enable_audio else False
 
     # ---------------------------------------------------------------- 状态
+
+    def _probe_audio(self) -> bool:
+        """启动时真开一次麦克风：设备缺失/未授权/被占用都在这里暴露，返回 False。"""
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            self._log(f"[rtc] 未安装 sounddevice（{e}），音频关闭")
+            return False
+        try:
+            info = sd.query_devices(self.audio_device, "input")
+            self.audio_rate = int(info.get("default_samplerate") or 48000)
+            try:
+                sd.check_input_settings(device=self.audio_device, channels=1,
+                                        samplerate=48000, dtype="int16")
+                self.audio_rate = 48000
+            except Exception:
+                pass  # 设备不支持 48k，用默认采样率，Opus 编码器内部会重采样
+            probe = sd.RawInputStream(samplerate=self.audio_rate, channels=1,
+                                      dtype="int16", device=self.audio_device)
+            probe.start()
+            probe.stop()
+            probe.close()
+            self._log(f"[rtc] 音频设备就绪（{info.get('name')} @{self.audio_rate}Hz）")
+            return True
+        except Exception as e:
+            self._log(f"[rtc] 音频不可用（{e}），audio=false")
+            return False
 
     @property
     def connected(self) -> bool:
@@ -118,8 +264,15 @@ class WebRTCMedia:
         p = self._peers.pop(peer, None)
         if not p:
             return
+        # 排查「协商成功但 0 帧」：关会话时打一行发送统计（稳态零噪声）
+        if p.track is not None:
+            self._log(f"[rtc] {peer} 关闭：已发 {p.track.frames} 帧"
+                      f"（{p.track.max_width}w {p.track.fps}fps @显示器{p.track.monitor}）")
         if p.task:
             p.task.cancel()
+        if p.mic:
+            self._log(f"[rtc] {peer} 音频已发 {p.mic.frames} 帧，丢弃 {p.mic.dropped} 块")
+            p.mic.stop()
         try:
             await p.pc.close()
         except Exception:
@@ -137,14 +290,17 @@ class WebRTCMedia:
         await self._close_peer(peer)
 
         pc = RTCPeerConnection(RTCConfiguration(iceServers=_parse_ice(ice)))
-        track = ScreenTrack(width=self.width, fps=self.fps)
+        track = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor)
         sess = _Peer(pc, track)
         self._peers[peer] = sess
 
         @pc.on("connectionstatechange")
         async def _on_state() -> None:
             sess.state = pc.connectionState
-            self._log(f"[rtc] {peer} → {pc.connectionState}")
+            # 带上实际生效的画质参数：排查 stream.config 是否真落到 track 上
+            self._log(f"[rtc] {peer} → {pc.connectionState}"
+                      f"（{sess.track.max_width}w {sess.track.fps}fps "
+                      f"{self.bitrate_bps // 1000}kbps 显示器{sess.track.monitor}）")
             if pc.connectionState in ("failed", "closed"):
                 # 只清理「自己」——同 peer 的重复 offer 会先建新会话，
                 # 旧会话的 closed 回调用 peer 键去关，会把新会话误杀。
@@ -167,13 +323,53 @@ class WebRTCMedia:
 
         pc.addTrack(track)
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
+        # 音频：只有对端 SDP 里确实有 m=audio 才挂轨——answer 不能新增 m-line，
+        # 硬加会让协商失败。addTrack 会复用 offer 建出的那条 recvonly 传输。
+        if self.audio_ok and "m=audio" in sdp:
+            mic = MicTrack(rate=self.audio_rate, device=self.audio_device)
+            if mic.start():
+                pc.addTrack(mic)
+                sess.mic = mic
+            else:
+                self._log("[rtc] 麦克风打开失败，本次仅推视频")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await self._send_json({"p": "rtc.answer", "peer": peer,
                                "sdp": pc.localDescription.sdp,
                                "bitrate": self.bitrate_bps // 1000})
-        self._log(f"[rtc] {peer} answer 已发（{self.width}w {self.fps}fps {self.bitrate_bps//1000}kbps）")
+        kinds = "视频+音频" if sess.mic else "仅视频"
+        self._log(f"[rtc] {peer} answer 已发（{kinds} {self.width}w {self.fps}fps "
+                  f"{self.bitrate_bps//1000}kbps）")
         sess.task = asyncio.create_task(self._bitrate_watchdog(sess))
+
+    async def select_screen(self, idx: int) -> int:
+        """切显示器：重建视频轨（分辨率变了）并强制关键帧，无需重新协商。
+
+        - pts 从旧轨续上，否则 RTP 时间戳会回跳，浏览器解码花屏
+        - 新旧分辨率不同时 aiortc 会重建编码器（天然 IDR + 新 SPS/PPS）；
+          相同时显式 `_send_keyframe()`，保证控制端下一帧就能出画
+        """
+        self.monitor = max(0, min(int(idx), self.screen_count - 1))
+        for sess in self._peers.values():
+            old = sess.track
+            new = ScreenTrack(width=self.width, fps=self.fps, monitor=self.monitor)
+            for attr in ("_start", "_timestamp"):  # 续接时间轴
+                if hasattr(old, attr):
+                    try:
+                        setattr(new, attr, getattr(old, attr))
+                    except Exception:
+                        pass
+            for sender in sess.pc.getSenders():
+                if sender.track is old:
+                    sender.replaceTrack(new)
+                    try:
+                        sender._send_keyframe()  # 下一帧强制 IDR
+                    except Exception:
+                        pass
+            sess.track = new
+            # 旧轨不 stop()：sender 可能正 await 它取帧，stop 会抛错并终止 RTP 任务
+        self._log(f"[rtc] 切换到显示器 {self.monitor}，已请求关键帧")
+        return self.monitor
 
     async def handle_ice(self, candidate: str, sdp_mid: Optional[str], sdp_mline: Optional[int],
                          peer: str = "default") -> None:
