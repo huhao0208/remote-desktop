@@ -350,12 +350,18 @@ class Env:
             env = dict(os.environ)
             if self.agent_pythonpath:
                 env["PYTHONPATH"] = self.agent_pythonpath
-            try:
-                out = subprocess.run([self.agent_py, "-c", code], capture_output=True,
-                                     timeout=90, env=env)
-                self._cap_s = float((out.stdout or b"").decode().strip().splitlines()[-1])
-            except Exception:
-                self._cap_s = -1.0
+            # 采集通道可能被其它 Agent 瞬时占住（30s 超时），重试取最快的一次
+            vals = []
+            for _ in range(3):
+                try:
+                    out = subprocess.run([self.agent_py, "-c", code], capture_output=True,
+                                         timeout=8, env=env)
+                    line = (out.stdout or b"").decode().strip().splitlines()
+                    if line:
+                        vals.append(float(line[-1]))
+                except Exception:
+                    continue
+            self._cap_s = min(vals) if vals else -1.0
         return self._cap_s
 
     def capture_block_reason(self, limit: float = 3.0) -> Optional[str]:
@@ -363,7 +369,8 @@ class Env:
         if 0 <= sec <= limit:
             return None
         hint = ("先确认显示器处于活动状态（合盖/无活动显示/休眠都会让 mss 抓屏阻塞 ~30s，"
-                "系统 screencapture 仍快），醒屏后仍慢则查「屏幕录制」TCC 授权；改完需重启 Agent")
+                "系统 screencapture 仍快）；再确认本机没有其它 Agent 在抓屏（采集通道被占也会 30s）；"
+                "都排除后查「屏幕录制」TCC 授权，改完需重启 Agent")
         if sec < 0:
             return f"环境不满足：本机 mss 抓屏探测抛异常；{hint}"
         return (f"环境不满足：本机 mss 进程内抓屏单帧 {sec}s（阈值 {limit}s），"
