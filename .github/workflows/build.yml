@@ -88,7 +88,6 @@ jobs:
         # aiortc/av/numpy 供 agent 的 WebRTC 媒体通道打包用（agent/webrtc_media.py）
         run: pip install fastapi "uvicorn[standard]" pyinstaller mss pillow pyautogui httpx websockets aiortc av numpy
       - name: 注入版本号
-        shell: bash
         # 写 agent/_version.py 与 srv2/_version.py；两个二进制都会带上版本，
         # `/healthz` 和 `uu-agent --version` 才有得报（自更新靠它判断新旧）
         shell: bash
@@ -527,7 +526,6 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: 注入版本号
-        shell: bash
         working-directory: .
         shell: bash
         run: |
