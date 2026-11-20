@@ -104,6 +104,21 @@ zlib 压过的归档，再压不动；onedir 是 119 MB 未压缩 → 47 MB 压�
 的约定一致）。本机实测：在该路径下 `--help` 正常；把整个 `.app` 改名再搬走后仍正常
 —— 说明 `_internal` 是按可执行文件位置解析的，不依赖原 dist 路径。
 
+**v0.1.3 发布件复验**（下载 Release 里的 `uu-remote-client-flutter-macos.zip` 后实测）：
+
+| 检查 | 结果 |
+|---|---|
+| zip 内 `Resources/agent/_internal/` 条目数 | 537（agent 二进制 8.0 MB + 109 MB 运行时） |
+| `codesign -dv` | `flags=0x2(adhoc)`、`Signature=adhoc` |
+| `codesign --verify --deep --strict` | 通过 |
+| `Codesign` 覆盖的 Mach-O（CI 日志） | **182 个**，含 av/numpy/google_crc32c 的 `.so`/`.dylib` |
+| 直接跑包内 agent | `--help` 正常，冷启 **161 ms**（连测 3 次 161/161/163） |
+| 解包体积 | 183 MB（v0.1.2 是 121 MB） |
+
+Linux tar 同理：`bundle/data/flutter_assets/agent/_internal/` 有 550 个条目、agent 可执行文件在位。
+Android 拆分件核对：`lib/` 下只有 `arm64-v8a/`（含 12.3 MB 的 `libjingle_peerconnection_so.so`），
+没有其它 ABI 目录 —— 说明 `--split-per-abi` 真的生效了。
+
 ## 4. CI 改动点
 
 1. `binary` job 的 `Install deps`：追加 `aiortc av numpy`
@@ -203,7 +218,8 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 共 **10 个资产**（5 个 Flutter 客户端 + 5 个服务端/Agent 包）。Electron 桌面端已从仓库删除、
 Capacitor 安卓/iOS 产物已停止发布，见 §9.3（v0.1.1 里还能下到，只作历史保留）。
 
-体积取自 v0.1.1 Release 实测值，四舍五入到 MB；v0.1.2 重新打包后以 Release 页数字为准。
+体积取自 **v0.1.3 Release 实测值**（§9.1/§9.2 表内数字即 `gh release view` 的字节数换算），
+四舍五入到 0.1 MB。
 `v0.1.0` 已标记为 **pre-release**，它的 `uu_remote` 是个 23 KB 的假文件、Linux 桌面包还缺失，
 只作历史保留，**不要下载**。
 
@@ -218,11 +234,15 @@ Capacitor 安卓/iOS 产物已停止发布，见 §9.3（v0.1.1 里还能下到�
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-windows-x64.zip` | 85 MB | Windows 做服务端或被控端（`uu-server.exe` / `uu-agent.exe`） |
-| `uu-remote-macos-arm64.tar.gz` | 66 MB | Apple Silicon Mac（M 系列）；CI 只产出 arm64，Intel Mac 需自行 `pyinstaller`（见 §2） |
-| `uu-remote-linux-x64.tar.gz` | 139 MB | Linux VPS / NAS 免 Docker 部署（也含被控端） |
+| `uu-remote-windows-x64.zip` | 79.7 MB | Windows 做服务端或被控端（`server/uu-server.exe` / `client/uu-agent/`） |
+| `uu-remote-macos-arm64.tar.gz` | 60.9 MB | Apple Silicon Mac（M 系列）；CI 只产出 arm64，Intel Mac 需自行 `pyinstaller`（见 §2） |
+| `uu-remote-linux-x64.tar.gz` | 130.1 MB | Linux VPS / NAS 免 Docker 部署（也含被控端） |
 | `uu-remote-android-termux.tar.gz` | 53 KB | 安卓手机 Termux 里直接跑源码（无预编译二进制，需 `pip install`） |
 | `uu-remote-universal.tar.gz` | 96 KB | 任意平台源码包（Python 3.10+），排查问题/改代码用 |
+
+> v0.1.3 起 `client/uu-agent` 是**目录**（`uu-agent` + `_internal/`），解压后要整目录拷。
+> 体积比 v0.1.2 小 1–2 MB（agent 排除 tkinter/sounddevice 后压缩率略升），
+> 但解包后从 51 MB 变成 109 MB —— 换的是冷启 4.6 s → 0.15 s，见 §3.1。
 
 服务端二进制**不含证书**：自己把 TLS 证书放到 `server/certs/fullchain.pem`、
 `privkey.pem`，否则 `uu-server` 起不来（或走 Docker Compose 挂载）。
@@ -230,17 +250,22 @@ Capacitor 安卓/iOS 产物已停止发布，见 §9.3（v0.1.1 里还能下到�
 ### 9.2 控制端（Flutter，唯一发布的客户端）
 
 官方浅色风界面，桌面/移动同一套代码、装上即用（内置默认服务器地址）。
-**三个桌面包都自带被控端 `uu-agent`**（PyInstaller 单文件，macOS 49 MB / Windows 68 MB），
-所以「允许其他设备控制本机」开箱可用；代价是包体比 v0.1.1 大很多——
-v0.1.1 的 macOS 包是 18 MB zip / 53 MB 解包，带上 agent 后变成约 82 MB zip / 121 MB 解包。
+**三个桌面包都自带被控端 `uu-agent`**（PyInstaller onedir，macOS 解包 109 MB / Windows 同量级），
+所以「允许其他设备控制本机」开箱可用；代价是包体比 v0.1.1 大很多——v0.1.1 的 macOS 包是
+18 MB zip / 53 MB 解包，带上 agent 后 v0.1.3 是 **75.8 MB zip / 183 MB 解包**。
 安卓包是纯控制端，不含 agent。
 
-| 资产 | 体积 | 给谁用 |
+| 资产 | 体积（v0.1.3 实测） | 给谁用 |
 |---|---|---|
-| `uu-remote-client-flutter-macos.zip` | 约 82 MB（解包 121 MB） | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
-| `uu-remote-client-flutter-windows.zip` | 约 89 MB（解包 118 MB） | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
-| `uu-remote-client-flutter-linux.tar.gz` | 约 121 MB | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
-| `uu-remote-client-flutter-android.apk` | 约 88 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
+| `uu-remote-client-flutter-macos.zip` | **75.8 MB**（解包 183 MB） | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
+| `uu-remote-client-flutter-windows.zip` | **83.5 MB** | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
+| `uu-remote-client-flutter-linux.tar.gz` | **113 MB** | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
+| `uu-remote-client-flutter-android-arm64-v8a.apk` | **29.4 MB** | 安卓手机（2017 年后的机器基本都是这个）；debug key 签名，可装不可上架；纯控制端 |
+| `uu-remote-client-flutter-android-armeabi-v7a.apk` | **21.9 MB** | 老机型 / 电视盒子（32 位 ARM） |
+
+**安卓怎么选包**：`adb shell getprop ro.product.cpu.abi` 看输出——`arm64-v8a` 选前者，
+`armeabi-v7a`/`armeabi` 选后者。装错会提示「应用未安装」（架构不匹配，不是包坏了）。
+v0.1.2 之前是 83.7 MB 的全 ABI 单包，拆分后体积降到 **29.4 MB（-65%）**。
 
 被控端首次运行需要在系统里授权：macOS 给「屏幕录制 + 辅助功能」，Windows/Linux 视系统而定。
 
@@ -309,9 +334,11 @@ v0.1.0 的 macOS/Linux Flutter 包是坏的（macOS 变成 23 KB 的 `uu_remote`
    a) agent 改 `--onedir` + 砍掉 tkinter/sounddevice：**冷启 4.6 s → 0.15 s（30 倍）**，
       agent 自身 zip 50.7 → 47.2 MB；代价是解包后 51 → 109 MB（见 §3.1，含逐项实测数据）。
       摊平进 `.app` 后路径不变（`Contents/Resources/agent/uu-agent`），客户端代码零改动。
-   b) Android 改 `--split-per-abi`，一个 88 MB 全 ABI 包拆成 arm64-v8a 与 armeabi-v7a 两个，
-      各自约 45 MB；x86_64（只有模拟器用）不发。**装之前要先看手机架构**：2017 年后的机器
-      基本都是 arm64-v8a，老的电视盒子/百元机是 armeabi-v7a，装错会提示「应用未安装」。
+   b) Android 改 `--split-per-abi`，一个 83.7 MB 全 ABI 包拆成 arm64-v8a（**29.4 MB**）与
+      armeabi-v7a（**21.9 MB**）两个，x86_64（只有模拟器用）不发。**装之前要先看手机架构**：
+      2017 年后的机器基本都是 arm64-v8a，老的电视盒子/百元机是 armeabi-v7a，装错会提示
+      「应用未安装」。实际降幅（-65%）比计划的「45 MB」还好，因为 flutter_webrtc 的
+      `libjingle_peerconnection_so.so` 单个 ABI 就有 12.3 MB，拆掉另外两个 ABI 省得更多。
 
 ## 10. v0.1.0 打包事故复盘（目录被当文件上传）
 
