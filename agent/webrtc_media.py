@@ -216,13 +216,26 @@ class ScreenTrack(VideoStreamTrack):
         img = await self._next_image()
         if img is None:  # 抓不到就复制上一帧，画面定格而不是断流/黑屏
             img = self._last
-        if img is None:  # 一帧都没成功过：给个占位深色帧，保证编码器有时钟
-            img = Image.new("RGB", (640, 360), (18, 18, 20))
+        if img is None:  # 一帧都没成功过：同尺寸占位帧，避免编码器反复重建
+            img = self._blank()
         frame = av.VideoFrame.from_image(img)
         frame.pts = pts
         frame.time_base = time_base
         self.sent += 1
         return frame
+
+    def _blank(self) -> Image.Image:
+        """按显示器尺寸生成占位帧（缓存），避免 640×360 ↔ 1920×1200 反复切分辨率。"""
+        if getattr(self, "_blank_img", None) is not None:
+            return self._blank_img
+        mons = list_monitors()
+        w, h = 640, 360
+        if self.monitor < len(mons):
+            m = mons[self.monitor]
+            w = min(self.max_width, m["width"])
+            h = max(2, int(m["height"] * w / m["width"] / 2) * 2)
+        self._blank_img = Image.new("RGB", (w - w % 2, h), (18, 18, 20))
+        return self._blank_img
 
 
 def _swallow(fut: asyncio.Future) -> None:
@@ -261,7 +274,7 @@ class MicTrack(AudioStreamTrack):
         self._pts = 0
         self.frames = 0
         self.dropped = 0
-        self._max_bytes = self.rate * 2 // 2  # 500ms 上限，超了丢最旧
+        self._max_bytes = self.rate * 2  # 1s 上限：抓屏偶发卡顿 0.3–0.5s 时不丢音频
 
     def start(self) -> bool:
         try:
@@ -310,6 +323,10 @@ class MicTrack(AudioStreamTrack):
     async def recv(self) -> av.AudioFrame:
         if self.readyState != "live":
             raise MediaStreamError
+        if self._pts == 0:  # 首帧：丢掉 start()~RTP 起播之间攒下的旧音频，避免一开始就滞后
+            with self._lock:
+                self._chunks.clear()
+                self._bytes = 0
         need = self.SAMPLES * 2
         if self._stream is None:
             await asyncio.sleep(0.02)  # 无设备时仍按实时节奏出静音
@@ -342,6 +359,15 @@ class _Peer:
         self.mic: Optional[MicTrack] = None
         self.task: Optional[asyncio.Task] = None
         self.state = "new"
+        # 换屏会重建轨：把已退役轨的统计累计到这里，关闭时才不会只报最后一条
+        self.sent_prev = 0
+        self.fails_prev = 0
+        self.timeouts_prev = 0
+
+    def stats(self) -> tuple:
+        return (self.track.sent + self.sent_prev,
+                self.track.grab_fail + self.fails_prev,
+                self.track.grab_timeout + self.timeouts_prev)
 
 
 class WebRTCMedia:
@@ -429,8 +455,9 @@ class WebRTCMedia:
             return
         # 排查「协商成功但 0 帧」：关会话时打一行发送统计（稳态零噪声）
         if p.track is not None:
-            self._log(f"[rtc] {peer} 关闭：已发 {p.track.sent} 帧"
-                      f"（抓屏失败 {p.track.grab_fail}、超时 {p.track.grab_timeout}，"
+            sent, fails, timeouts = p.stats()
+            self._log(f"[rtc] {peer} 关闭：已发 {sent} 帧"
+                      f"（抓屏失败 {fails}、超时 {timeouts}，"
                       f"{p.track.max_width}w {p.track.fps}fps "
                       f"@显示器{p.track.monitor}/{p.track.backend}）")
         if p.task:
@@ -533,6 +560,9 @@ class WebRTCMedia:
                         sender._send_keyframe()  # 下一帧强制 IDR
                     except Exception:
                         pass
+            sess.sent_prev += old.sent
+            sess.fails_prev += old.grab_fail
+            sess.timeouts_prev += old.grab_timeout
             sess.track = new
             # 旧轨不 stop()：sender 可能正 await 它取帧，stop 会抛错并终止 RTP 任务
         self._log(f"[rtc] 切换到显示器 {self.monitor}，已请求关键帧")

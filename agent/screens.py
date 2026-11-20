@@ -35,14 +35,23 @@ def _via_mss() -> list:
 
 
 def _via_quartz() -> list:
+    """CoreGraphics 原生列表：先用 active，再退 online（显示器睡眠时 active 为空、
+    online 仍有真实尺寸，而 screencapture 在这个状态下照样能截到画面）。"""
     if SYSTEM != "Darwin":
         return []
     try:
         import Quartz
-
-        ids = list(Quartz.CGGetActiveDisplayList(16, None, None)[1])
     except Exception:
         return []
+    ids: list = []
+    for fn in ("CGGetActiveDisplayList", "CGGetOnlineDisplayList"):
+        try:
+            got = getattr(Quartz, fn)(16, None, None)[1]
+            ids = [d for d in got if int(d) != 0]
+        except Exception:
+            ids = []
+        if ids:
+            break
     out = []
     for d in ids:
         try:

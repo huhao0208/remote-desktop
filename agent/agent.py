@@ -32,8 +32,10 @@ from PIL import Image
 
 try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.agent）都要能用
     from .clipboard_sync import ClipboardSync
+    from .screens import list_monitors
 except ImportError:
     from clipboard_sync import ClipboardSync
+    from screens import list_monitors
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
@@ -508,13 +510,18 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                         t0 = time.monotonic()
                         interval = 1.0 / stream_cfg["fps"]
                         try:
-                            # 无授权/无显示时 monitors 只有 0×0 的虚拟项：不能盲目 grab
+                            # 无授权时 mss 只给 0×0 的虚拟项：先回落到 Quartz 列表，
+                            # 有几何信息就能用 screencapture 通道出图
                             mons = [m for m in sct.monitors[1:]
                                     if m["width"] > 0 and m["height"] > 0]
                             if not mons:
-                                _notify_once("screen_permission")
-                                time.sleep(0.5)
-                                continue
+                                alt = list_monitors()
+                                if not alt:
+                                    _notify_once("screen_permission")
+                                    time.sleep(0.5)
+                                    continue
+                                mons = alt
+                                use_pil[0] = True  # mss 拿不到，只能用 screencapture
                             m = mons[min(capture_mon[0], len(mons) - 1)]
                             if use_pil[0]:  # 降级后端：macOS 的 screencapture，不受 mss 那条 TCC 通道限制
                                 from PIL import ImageGrab
