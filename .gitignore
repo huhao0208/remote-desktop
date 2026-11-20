@@ -41,7 +41,8 @@ proxy/venv/
 headers.txt
 *.html
 pc.json
-lib/
+# 只忽略仓库根目录的 lib/（逆向产物），不能误伤 client-flutter/lib/
+/lib/
 
 # 本项目自己的页面必须入库（上面 *.html 只用于逆向快照）
 !srv2/control.html
