@@ -67,3 +67,6 @@ data-local/
 
 # PyInstaller spec（--specpath . 会在仓库根生成）
 *.spec
+
+# QA 运行产物（每次跑都会变，不入库）
+tools/qa/.artifacts/

@@ -400,7 +400,16 @@ async function onMsg(e){
       if(m.state==='pending'){$('sdTitle').textContent='关机倒计时 '+m.remain+'s';$('sdGo').style.display='none';$('sdCancel').textContent='撤销关机';$('sdModal').style.display='flex'}
       else{$('sdModal').style.display='none';toast(m.state==='cancelled'?'已撤销关机':m.state==='executing'?'正在关机…':'关机状态: '+m.state)}
     }
-    else if(m.p==='agent.error')toast('Agent: '+m.err);
+    else if(m.p==='agent.error'){
+      // 被控端主动上报的可诊断错误：给出可操作提示，而不是只吐原始串
+      const ERRMSG={
+        screen_permission:'被控端缺少「屏幕录制」权限：系统设置 → 隐私与安全性 → 屏幕与系统音频录制，勾选后重启被控端',
+        screen_timeout:'被控端抓屏超时（显示器休眠或权限异常），画面已暂停，恢复后自动继续',
+        audio_unavailable:'被控端无可用音频输入设备，已自动关闭声音'
+      };
+      toast(ERRMSG[m.err]||('Agent: '+m.err));
+      if(m.err==='screen_permission'||m.err==='screen_timeout')setStatus('⚠ 被控端无法抓屏');
+    }
   }
 }
 $('quality').value=localStorage.getItem('rd_quality')||'1920,75,8000';
