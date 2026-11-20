@@ -182,15 +182,15 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 官方浅色风界面，桌面/移动同一套代码、装上即用（内置默认服务器地址）。
 **三个桌面包都自带被控端 `uu-agent`**（PyInstaller 单文件，macOS 49 MB / Windows 68 MB），
 所以「允许其他设备控制本机」开箱可用；代价是包体比 v0.1.1 大很多——
-v0.1.1 的 macOS 包是 18 MB zip / 53 MB 解包，带上 agent 后变成 82 MB zip / 121 MB 解包。
+v0.1.1 的 macOS 包是 18 MB zip / 53 MB 解包，带上 agent 后变成约 82 MB zip / 121 MB 解包。
 安卓包是纯控制端，不含 agent。
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-client-flutter-macos.zip` | 82 MB（解包 121 MB） | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
-| `uu-remote-client-flutter-windows.zip` | 89 MB（解包 118 MB） | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
-| `uu-remote-client-flutter-linux.tar.gz` | 116 MB | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
-| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
+| `uu-remote-client-flutter-macos.zip` | 约 82 MB（解包 121 MB） | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
+| `uu-remote-client-flutter-windows.zip` | 约 89 MB（解包 118 MB） | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
+| `uu-remote-client-flutter-linux.tar.gz` | 约 121 MB | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
+| `uu-remote-client-flutter-android.apk` | 约 42 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
 
 被控端首次运行需要在系统里授权：macOS 给「屏幕录制 + 辅助功能」，Windows/Linux 视系统而定。
 
