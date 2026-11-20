@@ -60,13 +60,9 @@ jobs:
             sep: ";"
             ext: ".exe"
             archive: zip
-          - os: macos-14          # Apple Silicon
+          # 注：该账号不支持 macos-14 / macos-13 标签（探针实测），只能用 macos-latest(arm64)
+          - os: macos-latest      # Apple Silicon
             name: macos-arm64
-            sep: ":"
-            ext: ""
-            archive: tar
-          - os: macos-13          # Intel
-            name: macos-x64
             sep: ":"
             ext: ""
             archive: tar
@@ -184,12 +180,10 @@ jobs:
           - os: windows-latest
             name: windows-x64
             build: "--win"
-          - os: macos-14
-            name: macos-arm64
-            build: "--mac --arm64"
-          - os: macos-13
-            name: macos-x64
-            build: "--mac --x64"
+          # 一个 arm64 runner 同时产出 arm64 与 x64 两个 dmg（electron-builder 跨架构打包）
+          - os: macos-latest
+            name: macos
+            build: "--mac --arm64 --x64"
           - os: ubuntu-latest
             name: linux-x64
             build: "--linux"
@@ -278,7 +272,7 @@ jobs:
   # 未签名工程：需在有 Xcode 的 Mac 上打开、选签名团队后 Archive 出 ipa。
   ios-project:
     needs: test
-    runs-on: macos-14
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: client-mobile
