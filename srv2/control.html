@@ -231,7 +231,7 @@ function iceList(){
   (ice.turn||[]).forEach(t=>{if(t&&t.urls)out.push({urls:t.urls,username:t.username,credential:t.credential})});
   return out;
 }
-async function startRTC(){
+async function startRTC(withAudio){
   // 幂等：已连上就不重复协商；但「connecting 卡住超 6s」或 new 未发过 offer 要允许重来
   if(pc){
     const st=pc.connectionState;
@@ -249,11 +249,16 @@ async function startRTC(){
     const tr=pc.addTransceiver('video',{direction:'recvonly'});
     tr.degradationPreference='maintain-resolution';
   }catch(e){pc.addTransceiver('video',{direction:'recvonly'})}
+  // 音频 m-line 必须客户端主动加：Agent 侧是「offer 里有 m=audio 才 addTrack」，
+  // 不加这条它就永远不发音频（表现是有画面、永远没声音）
+  if(withAudio){
+    try{pc.addTransceiver('audio',{direction:'recvonly'})}catch(e){}
+  }
   pc.ontrack=e=>{
     if(e.track&&e.track.kind==='audio'){
       // 音频单独挂 <audio>，不进画面布局；静音只改本地元素，不打扰被控端
       const aud=$('aud');
-      aud.srcObject=e.streams[0];
+      aud.srcObject=e.streams&&e.streams.length?e.streams[0]:new MediaStream([e.track]);
       aud.muted=!audioOn;aud.play().catch(()=>{});
       e.track.addEventListener('ended',()=>{});
       return;
@@ -364,7 +369,7 @@ async function onMsg(e){
       screenW=m.screen.w;screenH=m.screen.h;remoteOs=m.os||'';applyCombos();
       toast('已连接 '+m.name+' ('+m.os+')'+(m.os==='Darwin'&&matchMedia('(pointer:fine)').matches?' · 物理键盘已接管':''));
       // Agent 支持 WebRTC 就走 H.264/UDP；否则沿用 JPEG 通路
-      if(m.media==='webrtc'){if(!pc||pc.connectionState!=='connected')startRTC()}else stopRTC();
+      if(m.media==='webrtc'){if(!pc||pc.connectionState!=='connected')startRTC(m.audio===true)}else stopRTC();
       // v2 能力：有音频才显示声音按钮；多屏才显示选择器
       $('btnAudio').style.display=m.audio?'':'none';
       $('aud').style.display=m.audio?'':'none';
