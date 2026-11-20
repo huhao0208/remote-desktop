@@ -10,6 +10,7 @@ import '../core/settings.dart';
 import '../signaling/signaling_client.dart';
 import 'media_transport.dart';
 import 'rtc_signaling.dart';
+import 'rtc_stats.dart';
 
 /// 连接不可用时的回调（页面据此回落 JPEG，协议 §5）。
 typedef WebRtcFallback = void Function(String reason);
@@ -362,6 +363,10 @@ class WebRtcTransport extends MediaTransport {
         final String kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
         if (kind != 'video') continue;
         _updateStats(values);
+        // 对账日志只在「真的连着」时打：回落/断开立刻停，避免日志误导
+        if (pc.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          debugPrint(formatRtpStatsLine(values));
+        }
         return;
       }
     } catch (e) {
@@ -370,39 +375,21 @@ class WebRtcTransport extends MediaTransport {
     }
   }
 
-  /// 字段名各平台略有差异（`framesPerSecond` vs 自算 `framesDecoded` 差值），两种都试。
-  ///
-  /// `fps == null` 表示**还没收到过任何帧**（HUD 显示 `—`）；一旦收到过帧，后续
-  /// 掉到 0 就是真的卡住，如实显示 `0 fps`。
+  /// HUD 统计：fps 两个来源（原生 `framesPerSecond` / `framesDecoded` 增量），
+  /// 两个都拿不到才是 `null`（HUD 显示 `—`，表示「还没统计到」而不是 0 帧）。
   void _updateStats(Map<dynamic, dynamic> values) {
-    final int width = _asInt(values['frameWidth']);
-    final int height = _asInt(values['frameHeight']);
-    final int frames = _asInt(values['framesDecoded'] ?? values['framesReceived']);
-
-    int fps = _asInt(values['framesPerSecond']);
     final DateTime now = DateTime.now();
-    final DateTime? last = _lastStatsAt;
-    if (fps <= 0 && last != null && frames > 0) {
-      final double seconds = now.difference(last).inMilliseconds / 1000.0;
-      if (seconds > 0.1) fps = ((frames - _lastFrames) / seconds).round();
-    }
-    if (frames > 0) {
+    _stats.value = parseInboundStats(
+      values,
+      lastFrames: _lastFrames,
+      lastAt: _lastStatsAt,
+      now: now,
+    );
+    final int? frames = rtpInt(values['framesDecoded'] ?? values['framesReceived']);
+    if (frames != null && frames > 0) {
       _lastFrames = frames;
       _lastStatsAt = now;
     }
-    if (fps < 0) fps = 0;
-
-    _stats.value = TransportStats(
-      fps: frames > 0 ? fps : null,
-      width: width,
-      height: height,
-    );
-  }
-
-  static int _asInt(Object? v) {
-    if (v is num) return v.toInt();
-    if (v is String) return int.tryParse(v) ?? 0;
-    return 0;
   }
 
   // ------------------------------------------------------------ 降级

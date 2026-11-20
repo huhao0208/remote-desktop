@@ -31,7 +31,7 @@ Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`cl
 | 关机 `shutdown` UI、文件传输、剪贴板、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
 
 骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze --fatal-infos` → **No issues found**，
-`flutter test` → 44 passed，`flutter build bundle`（Dart 全量编译）通过。
+`flutter test` → 54 passed，`flutter build bundle`（Dart 全量编译）通过。
 
 ---
 
@@ -212,10 +212,14 @@ Flutter 控制端                                    Agent
 | `jitterBufferTarget = 0` | ❌ 未实现 | 插件未暴露该参数，抖动缓冲由插件默认策略控制（实测 20–50ms），见「已知限制」 |
 
 HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
-`inbound-rtp(kind=video)`：`framesPerSecond` / `frameWidth` / `frameHeight`
-（没有 `framesPerSecond` 时按 `framesDecoded` 差分自算）。
+`inbound-rtp(kind=video)`：`frameWidth` / `frameHeight` + fps。**fps 有两个来源**
+（`lib/media/rtc_stats.dart`）：
 
-**还没收到首帧时 fps 显示 `—`**（不是 `0 fps`）：`TransportStats.fps` 为 `null` 表示「没统计到」，
+1. 原生 `framesPerSecond`（Chrome/桌面 libwebrtc 一般都有）；
+2. 该字段缺失或为 0 时，用 `framesDecoded`（或 `framesReceived`）的**增量 / 时间**自算
+   ——所以 Android/iOS 上不会出现「画面正常但 HUD 显示 `—`」。
+
+**两个来源都拿不到才是 `—`**（`TransportStats.fps == null`）：含义是「还没统计到」；
 一旦收到过帧，后续掉到 0 就是真卡住，如实显示 `0 fps`。这样「协商成功但没帧」不会看起来像「卡在 0 帧」。
 
 ### 5.3 失败怎么回落（协议 §5）
@@ -234,6 +238,23 @@ HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
 **不允许未捕获异常冒到 Zone 顶层**——那种表现是「没有崩溃但画面静默停住」，很难查。
 
 回落是单向的：一次会话内不再自动重试 WebRTC，需要点「重新连接」（避免和 Agent 的重协商互踢）。
+
+**对账日志**（`pc.connectionState == connected` 时每秒一行，`grep '\[webrtc\] rtp'`）：
+
+```
+[webrtc] rtp framesReceived=196 framesDecoded=180 packetsReceived=4210 nack=2 pli=1 jbMs=15
+```
+
+| 字段 | 含义 | 怎么读 |
+|---|---|---|
+| `framesReceived` / `framesDecoded` | 收包解出的帧 / 解码成功的帧 | 两者差得大 = 有包但解不出（丢关键帧、丢包） |
+| `packetsReceived` | RTP 包数 | 应与帧数同向增长 |
+| `nack` / `pli` | 本端发出的重传请求 / 关键帧请求 | 只增不减，看增量；PLI 暴涨说明花屏/丢包 |
+| `jbMs` | 抖动缓冲平均延迟（`jitterBufferDelay / jitterBufferEmittedCount`） | 20–50ms 正常，持续 >200ms 是网络抖动 |
+
+字段缺失一律写 `-`（**不当作 0**，也不影响 HUD）；回落/断开后立即停止打印，
+所以「日志停了」等价于「通路已经不在了」。用途：和 Agent 侧 `关闭：已发 N 帧` 对表——
+`N ≈ framesReceived` 说明丢在解码之后；`N >> framesReceived` 说明丢在 RTP/网络。
 
 另有一类「不是回落、但也不该转圈」的情况：`agent.error`。已知码会翻成人话并**常驻**在画面区顶部
 （带重连入口），新 `hello` 或重连时清除：
@@ -284,7 +305,7 @@ macOS：沙盒必须开 `com.apple.security.network.client`（已在
 ```
 $ flutter pub get                     → +9 dependencies（flutter_webrtc 1.6.3 / dart_webrtc 1.8.2 ...）
 $ flutter analyze --fatal-infos       → No issues found!
-$ flutter test                        → 00:09 +44: All tests passed!
+$ flutter test                        → 00:10 +54: All tests passed!
 $ flutter build bundle                → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
 ```
 
@@ -429,7 +450,7 @@ flutter build bundle     # Dart 全量编译，但不出安装包
   macOS 打进 `Contents/Resources/agent/` 并签名，Windows 放 exe 同目录，Linux 放
   `bundle/data/flutter_assets/agent/`。CI 目前不构建 Agent，需要 release 流程补一步拷贝；
   `flutter build bundle` 不含它（也没法含，二进制由 pyinstaller 产出）。
-- `flutter test` 现在 44 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
+- `flutter test` 现在 54 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
   `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ 被控端路径/参数/进程生命周期
   （`test/agent_host_test.dart`，真起 `/bin/sh` 假 agent）+ UI 组件；仍没有 widget/集成测试
   （需要真机或模拟器，且 WebRTC 必须有 Agent 在对面）。
