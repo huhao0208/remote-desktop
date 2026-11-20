@@ -51,6 +51,9 @@ class _RemotePageState extends State<RemotePage> {
 
   bool _connecting = true;
   String? _error;
+
+  /// `agent.error` 的可读说明，常驻在画面区顶部（清空条件：新 hello / 重连）。
+  String? _agentError;
   bool _stalled = false;
   bool _applyingHello = false;
 
@@ -169,6 +172,7 @@ class _RemotePageState extends State<RemotePage> {
     await _signaling?.close();
     _signaling = null;
     _hello = null;
+    _agentError = null;
     _lastFrameAt = null;
     _stalled = false;
     _room = null;
@@ -197,10 +201,21 @@ class _RemotePageState extends State<RemotePage> {
       case 'shutdown.state':
         _toast('关机状态：${message['state']}');
       case 'agent.error':
-        _toast('被控端错误：${message['err']}');
+        _onAgentError(message['err']);
       default:
         break;
     }
+  }
+
+  /// `agent.error` 的已知错误码 → 人话。
+  ///
+  /// `screen_permission`：Agent 侧 `screens == 0`（显示器全关/合盖，或缺屏幕录制授权），
+  /// 这时它仍会发 hello，但画面永远是空的——必须常驻提示，不能只弹一个 toast 然后转圈。
+  void _onAgentError(Object? code) {
+    final String text = describeAgentError(code);
+    _toast(text);
+    if (!mounted) return;
+    setState(() => _agentError = text);
   }
 
   Future<void> _handleHello(AgentHello hello) async {
@@ -223,6 +238,8 @@ class _RemotePageState extends State<RemotePage> {
 
     setState(() {
       _hello = hello;
+      // 新 hello = 被控端重来一次，旧的错误提示作废（随后若仍有问题会再收到 agent.error）
+      _agentError = null;
       if (hello.width > 0 && hello.height > 0) {
         _screen = Size(hello.width.toDouble(), hello.height.toDouble());
       }
@@ -939,7 +956,11 @@ class _RemotePageState extends State<RemotePage> {
               fit: StackFit.expand,
               children: <Widget>[
                 ColoredBox(color: Colors.black, child: _buildVideo()),
-                if (_stalled) _stalledOverlay(),
+                // 被控端明确报错（如没屏/缺授权）优先于「中断」提示：转圈解决不了问题
+                if (_agentError != null)
+                  _noticeOverlay(_agentError!)
+                else if (_stalled)
+                  _stalledOverlay(),
                 // 全屏收起工具栏时，只有底部一小条热区负责唤出
                 if (_fullscreen && !_chromeVisible)
                   Positioned(
@@ -1023,6 +1044,35 @@ class _RemotePageState extends State<RemotePage> {
     );
   }
 
+  /// 被控端主动报错（如 `screen_permission`）：常驻一条，带重连入口。
+  Widget _noticeOverlay(String text) {
+    return Align(
+      alignment: Alignment.topCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(top: AppSpace.lg),
+        child: GlassPanel(
+          borderColor: AppColors.danger.withValues(alpha: 0.45),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.error_outline, size: 15, color: AppColors.danger),
+              const SizedBox(width: AppSpace.sm),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Text(text, style: const TextStyle(color: AppColors.danger, fontSize: 12)),
+              ),
+              const SizedBox(width: AppSpace.md),
+              InkWell(
+                onTap: _reconnect,
+                child: const Text('重连', style: TextStyle(color: AppColors.info, fontSize: 12)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _errorView(String message) {
     return EmptyState(
       icon: Icons.link_off,
@@ -1040,6 +1090,20 @@ class _RemotePageState extends State<RemotePage> {
         ],
       ),
     );
+  }
+}
+
+/// `agent.error` 的已知错误码 → 中文说明（`p:"agent.error", err:"..."`）。
+///
+/// 未知码原样透出，别静默吞掉——联调时要能看到 Agent 到底报了什么。
+String describeAgentError(Object? code) {
+  switch ('$code') {
+    case 'screen_permission':
+      return '被控端没有可用屏幕：显示器已关闭或缺少屏幕录制授权';
+    case 'audio_unavailable':
+      return '被控端音频不可用（麦克风/系统声音打不开），画面不受影响';
+    default:
+      return '被控端错误：$code';
   }
 }
 

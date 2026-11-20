@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:uu_remote/core/app_config.dart';
 import 'package:uu_remote/core/input_events.dart';
 import 'package:uu_remote/core/models.dart';
+import 'package:uu_remote/pages/remote_page.dart' show describeAgentError;
 
 void main() {
   group('agent.hello 解析', () {
@@ -145,6 +146,19 @@ void main() {
       expect(hasTimestamp, isTrue);
       final int offset = hasTimestamp ? 12 : 4;
       expect(frame.sublist(offset, offset + 2), <int>[0xFF, 0xD8]);
+    });
+  });
+
+  group('agent.error 文案', () {
+    test('无屏/缺授权 → 明确指向显示器或屏幕录制权限', () {
+      final String text = describeAgentError('screen_permission');
+      expect(text, contains('屏幕'));
+      expect(text, isNot(contains('screen_permission')));
+    });
+
+    test('未知错误码原样透出，不静默吞掉', () {
+      expect(describeAgentError('something_new'), contains('something_new'));
+      expect(describeAgentError(null), contains('null'));
     });
   });
 }

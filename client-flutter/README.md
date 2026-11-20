@@ -31,7 +31,7 @@ Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`cl
 | 关机 `shutdown` UI、文件传输、剪贴板、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
 
 骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze --fatal-infos` → **No issues found**，
-`flutter test` → 42 passed，`flutter build bundle`（Dart 全量编译）通过。
+`flutter test` → 44 passed，`flutter build bundle`（Dart 全量编译）通过。
 
 ---
 
@@ -235,6 +235,14 @@ HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
 
 回落是单向的：一次会话内不再自动重试 WebRTC，需要点「重新连接」（避免和 Agent 的重协商互踢）。
 
+另有一类「不是回落、但也不该转圈」的情况：`agent.error`。已知码会翻成人话并**常驻**在画面区顶部
+（带重连入口），新 `hello` 或重连时清除：
+
+| `err` | 含义 |
+|---|---|
+| `screen_permission` | 被控端没有可用屏幕（显示器关闭/合盖，或缺少屏幕录制授权）。此时 hello 里 `screen.w/h` 常为 0，HUD 会显示 `— · 0×0` |
+| 其他 | 原样显示，不吞掉，方便联调看 Agent 到底报了啥 |
+
 ### 5.4 iOS 需要什么 Info.plist 权限
 
 纯接收**不需要**摄像头/麦克风权限，`ios/Runner/Info.plist` 现在一项都不用加。需要补的只有：
@@ -276,7 +284,7 @@ macOS：沙盒必须开 `com.apple.security.network.client`（已在
 ```
 $ flutter pub get                     → +9 dependencies（flutter_webrtc 1.6.3 / dart_webrtc 1.8.2 ...）
 $ flutter analyze --fatal-infos       → No issues found!
-$ flutter test                        → 00:08 +42: All tests passed!
+$ flutter test                        → 00:09 +44: All tests passed!
 $ flutter build bundle                → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
 ```
 
@@ -421,7 +429,7 @@ flutter build bundle     # Dart 全量编译，但不出安装包
   macOS 打进 `Contents/Resources/agent/` 并签名，Windows 放 exe 同目录，Linux 放
   `bundle/data/flutter_assets/agent/`。CI 目前不构建 Agent，需要 release 流程补一步拷贝；
   `flutter build bundle` 不含它（也没法含，二进制由 pyinstaller 产出）。
-- `flutter test` 现在 42 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
+- `flutter test` 现在 44 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
   `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ 被控端路径/参数/进程生命周期
   （`test/agent_host_test.dart`，真起 `/bin/sh` 假 agent）+ UI 组件；仍没有 widget/集成测试
   （需要真机或模拟器，且 WebRTC 必须有 Agent 在对面）。
