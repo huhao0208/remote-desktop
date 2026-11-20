@@ -32,10 +32,10 @@ from PIL import Image
 
 try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.agent）都要能用
     from .clipboard_sync import ClipboardSync
-    from .screens import list_monitors
+    from .screens import grab_screencapture, list_monitors
 except ImportError:
     from clipboard_sync import ClipboardSync
-    from screens import list_monitors
+    from screens import grab_screencapture, list_monitors
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
@@ -423,8 +423,15 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                     continue
                 try:
                     if p == "rtc.offer" and rtc:
-                        await rtc.handle_offer(ev.get("sdp", ""), ev.get("ice"),
-                                               str(ev.get("peer") or "default"))
+                        # 收到 offer 就停 JPEG 采集：macOS 同一条采集通道被并发抓屏会卡 30s
+                        # （实测：JPEG 循环 + WebRTC 首帧同时 grab → 双双超时）
+                        streaming.clear()
+                        try:
+                            await rtc.handle_offer(ev.get("sdp", ""), ev.get("ice"),
+                                                   str(ev.get("peer") or "default"))
+                        except Exception:
+                            streaming.set()  # 协商失败就恢复 JPEG 兜底
+                            raise
                     elif p == "rtc.ice" and rtc:
                         await rtc.handle_ice(ev.get("candidate", ""), ev.get("sdpMid"),
                                              ev.get("sdpMLineIndex"),
@@ -491,6 +498,8 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 last_hash = None
                 err_sent = [False]
                 use_pil = [False]  # JPEG 通路降级后端（macOS: screencapture）
+                slow = [0]         # 连续慢抓屏次数（避免一次争用就永久降级）
+                fails = [0]        # 连续抓屏失败次数（用于退避，别空转）
 
                 def _notify_once(err: str) -> None:
                     if err_sent[0]:
@@ -524,18 +533,23 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                                 use_pil[0] = True  # mss 拿不到，只能用 screencapture
                             m = mons[min(capture_mon[0], len(mons) - 1)]
                             if use_pil[0]:  # 降级后端：macOS 的 screencapture，不受 mss 那条 TCC 通道限制
-                                from PIL import ImageGrab
-                                img = ImageGrab.grab(bbox=(m["left"], m["top"],
-                                                           m["left"] + m["width"],
-                                                           m["top"] + m["height"]))
+                                img = grab_screencapture((m["left"], m["top"],
+                                                          m["left"] + m["width"],
+                                                          m["top"] + m["height"]))
                             else:
                                 g0 = time.monotonic()
                                 shot = sct.grab(m)
-                                if SYSTEM == "Darwin" and time.monotonic() - g0 > 3:
-                                    use_pil[0] = True
-                                    _notify_once("screen_timeout")
-                                    print("[agent] JPEG 抓屏超时，切到 ImageGrab(screencapture) 后端",
-                                          flush=True)
+                                dt = time.monotonic() - g0
+                                # 连续两次慢抓屏才切后端：单次慢可能只是和 WebRTC 抢通道
+                                if SYSTEM == "Darwin" and dt > 3:
+                                    slow[0] += 1
+                                    if slow[0] >= 3:
+                                        use_pil[0] = True
+                                        _notify_once("screen_timeout")
+                                        print("[agent] JPEG 抓屏连续超时，切到 screencapture 后端",
+                                              flush=True)
+                                else:
+                                    slow[0] = 0
                                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
                             w = stream_cfg["width"]
                             if img.width > w:
@@ -544,6 +558,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                             # 画面没变则不重复编码（省带宽）；但每 2s 保活一帧
                             h = hashlib.md5(img.tobytes()[::997]).digest()
                             now = time.monotonic()
+                            fails[0] = 0
                             if h != last_hash or now - getattr(capture_loop, "_ka", 0) > 2:
                                 last_hash = h
                                 capture_loop._ka = now
@@ -557,12 +572,21 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                                 loop.call_soon_threadsafe(_offer, data)
                         except Exception as e:
                             # mss 抛错（无授权/显示器消失）：macOS 上切 screencapture 再试
-                            if SYSTEM == "Darwin" and not use_pil[0]:
+                            fails[0] += 1
+                            if SYSTEM == "Darwin" and not use_pil[0] and fails[0] >= 2:
                                 use_pil[0] = True
                                 _notify_once("screen_permission")
-                                print(f"[agent] JPEG 抓屏失败（{e}），切到 ImageGrab(screencapture) 后端",
+                                print(f"[agent] JPEG 抓屏失败（{e}），切到 screencapture 后端",
                                       flush=True)
-                            time.sleep(0.2)  # 单帧失败跳过，不断流
+                            if fails[0] >= 3:
+                                if fails[0] % 10 == 3:
+                                    print(f"[agent] JPEG 抓屏连续失败 {fails[0]} 次，降频重试", flush=True)
+                                if fails[0] >= 10:
+                                    # 能枚举到屏却抓不到像素：睡屏/遮罩/授权被撤，让控制端提示
+                                    _notify_once("screen_permission")
+                                time.sleep(1.0)
+                            else:
+                                time.sleep(0.2)  # 单帧失败跳过，不断流
                         time.sleep(max(0.0, interval - (time.monotonic() - t0)))
 
             def _offer(data: bytes) -> None:

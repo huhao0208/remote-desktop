@@ -28,9 +28,9 @@ from aiortc.mediastreams import AudioStreamTrack, MediaStreamError, VideoStreamT
 from PIL import Image
 
 try:  # 脚本直跑与包内导入都要能用
-    from .screens import list_monitors
+    from .screens import grab_screencapture, list_monitors
 except ImportError:
-    from screens import list_monitors
+    from screens import grab_screencapture, list_monitors
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 
@@ -89,6 +89,7 @@ class ScreenTrack(VideoStreamTrack):
         self._ready: Optional[Image.Image] = None     # 抓到但还没送出的图
         self._last: Optional[Image.Image] = None      # 上一张成功帧（超时时复制）
         self._notified: set = set()
+        self._fails_run = 0                            # 连续失败次数（成功即归零）
         self.available = self._check_screen()
 
     # ------------------------------------------------------------ 自检/告警
@@ -124,9 +125,9 @@ class ScreenTrack(VideoStreamTrack):
             self._log(f"[agent] 抓屏超时 {self.grab_timeout} 次（>{self.GRAB_TIMEOUT:.0f}s），跳过该帧")
         if self.grab_timeout == 1:
             self._notify("screen_timeout")
-        # macOS：mss 走 CGWindowList，无授权/无显示时会一直卡；
-        # 切到 screencapture 通道（ImageGrab），并放弃卡住的那次抓屏（只切一次）
-        if self.backend == "mss" and SYSTEM == "Darwin":
+        # 连续 3 次超时（≈9s）才换后端：起播瞬间和 JPEG 兜底通路抢采集通道只会慢 1–2 帧，
+# 一慢就永久降级会白白丢掉 mss 的 30fps 通道
+        if self.grab_timeout >= 3 and self.backend == "mss" and SYSTEM == "Darwin":
             self.backend = "pil"
             self._log("[agent] 抓屏超时，切到 ImageGrab(screencapture) 后端")
             if self._pending is not None:
@@ -157,10 +158,7 @@ class ScreenTrack(VideoStreamTrack):
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
     def _grab_pil(self) -> Image.Image:
-        from PIL import ImageGrab
-
-        box = self._monitor_box()
-        return ImageGrab.grab(bbox=box) if box else ImageGrab.grab()
+        return grab_screencapture(self._monitor_box())
 
     def _grab_sync(self) -> Image.Image:
         try:
@@ -206,9 +204,17 @@ class ScreenTrack(VideoStreamTrack):
             return None
         except Exception:
             self.grab_fail += 1
+            self._fails_run += 1
             self._pending = None
+            if self._fails_run in (3, 10) or self._fails_run % 30 == 0:
+                self._log(f"[agent] 抓屏失败 {self._fails_run} 次（连续），降频重试")
+            if self._fails_run >= 10:
+                # 能枚举到显示器却抓不到像素 = 睡屏/被遮罩/授权被撤
+                self._notify("screen_permission")
+                await asyncio.sleep(0.5)  # 降频到约 2fps，别空转烧 CPU/带宽
             return None
         self._pending = None
+        self._fails_run = 0
         return img
 
     async def recv(self) -> av.VideoFrame:

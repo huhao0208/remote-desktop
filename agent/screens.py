@@ -92,3 +92,38 @@ def list_monitors() -> list:
         "primary": i == primary,
         "source": source,
     } for i, m in enumerate(mons)]
+
+
+def grab_screencapture(box=None):
+    """用系统 `screencapture` 截图（macOS 的 ScreenCaptureKit 通道，不受 mss 那条 TCC 限制）。
+
+    自己起子进程而不用 PIL.ImageGrab：PIL 会继承 stderr，失败时把
+    「could not create image from display with rect …」直接刷到 Agent 日志里。
+    box = (left, top, right, bottom)；不给则整屏。
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    from PIL import Image
+
+    fh, path = tempfile.mkstemp(".png")
+    os.close(fh)
+    args = ["screencapture", "-x"]
+    if box:
+        left, top, right, bottom = box
+        args += ["-R", f"{left},{top},{right - left},{bottom - top}"]
+    args.append(path)
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=10)
+        if r.returncode != 0 or not os.path.getsize(path):
+            raise RuntimeError((r.stderr or b"").decode("utf-8", "replace").strip()[:120]
+                               or f"screencapture 返回 {r.returncode}")
+        im = Image.open(path)
+        im.load()
+        return im
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
