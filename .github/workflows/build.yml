@@ -15,6 +15,7 @@
 #   控制端客户端（Flutter 一套代码，内置服务器地址，装上即用）：
 #     uu-remote-client-flutter-macos.zip   macOS 桌面（.app 打包成 zip）
 #     uu-remote-client-flutter-linux.tar.gz Linux 桌面（bundle/）
+#     uu-remote-client-flutter-windows.zip Windows 桌面（uu_remote.exe + 依赖目录）
 #     uu-remote-client-flutter-android.apk 安卓
 #   手机控制端也可免安装 H5：https://<host>:8443/control
 #
@@ -419,6 +420,48 @@ jobs:
           path: uu-remote-client-flutter-linux.tar.gz
           retention-days: 30
 
+  # Windows 桌面 App：windows-latest 自带 VS 2022（含「使用 C++ 的桌面开发」工作负载），
+  # 正常不需要额外装 MSVC；万一镜像变更导致 flutter build 报缺工具链，再补 setup-msbuild。
+  flutter-build-windows:
+    needs: flutter-verify
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: client-flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Package build into zip
+        # 同 macOS/Linux：Release 目录不能直接上传（merge-multiple 会拆散），先打一个 zip。
+        # 解压即得 uu_remote.exe 与 flutter_windows.dll / data/ 同级，直接双击运行。
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = 'build/windows/x64/runner/Release'
+          if (-not (Test-Path $src)) { throw "构建产物缺失：$src" }
+          $zip = Join-Path $env:GITHUB_WORKSPACE 'uu-remote-client-flutter-windows.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $src '*') -DestinationPath $zip -CompressionLevel Optimal
+          Get-Item $zip | Select-Object Name, Length | Format-List | Out-String | Write-Host
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $names = @($archive.Entries | ForEach-Object { $_.FullName })
+          $archive.Entries | Select-Object -First 6 FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+          $archive.Dispose()
+          if ($names -notcontains 'uu_remote.exe') { throw 'zip 根目录没有 uu_remote.exe，打包结构不对' }
+          Write-Host "entries: $($names.Count)，uu_remote.exe 已确认在根目录"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-flutter-windows
+          path: uu-remote-client-flutter-windows.zip
+          retention-days: 30
+
   # Android APK：未配正式签名，release 包用 debug key 签名（可装可跑，不能上架）
   flutter-build-android:
     needs: flutter-verify
@@ -453,7 +496,8 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, source-packs,
-            flutter-build-macos, flutter-build-linux, flutter-build-android]
+            flutter-build-macos, flutter-build-linux, flutter-build-windows,
+            flutter-build-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
