@@ -4,15 +4,15 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      UU_PUBLIC_BASE: "https://${PUBLIC_HOST}:8443"
-      UU_WS_BASE: "wss://${PUBLIC_HOST}:8443"
+      UU_PUBLIC_BASE: "https://${PUBLIC_HOST}:${API_PORT:-8443}"
+      UU_WS_BASE: "wss://${PUBLIC_HOST}:${API_PORT:-8443}"
       UU_STUN_URLS: "stun:${PUBLIC_HOST}:3478"
       UU_TURN_URLS: "turn:${PUBLIC_HOST}:3478?transport=udp,turn:${PUBLIC_HOST}:3478?transport=tcp"
       UU_TURN_SECRET: "${TURN_SECRET}"
       UU_TURN_TTL: "86400"
       UU_RPC_TIMEOUT: "30"
     ports:
-      - "8443:8443"
+      - "${API_PORT:-8443}:8443"
     volumes:
       - ./certs:/certs:ro
       - uu-data:/app/data

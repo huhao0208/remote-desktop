@@ -42,3 +42,24 @@ headers.txt
 *.html
 pc.json
 lib/
+
+# 本项目自己的页面必须入库（上面 *.html 只用于逆向快照）
+!srv2/control.html
+
+# 客户端工程：源码入库，依赖与构建产物不入库
+node_modules/
+client-desktop/release/
+client-desktop/bin/
+client-desktop/web/
+client-mobile/www/
+client-mobile/android/.gradle/
+client-mobile/android/build/
+client-mobile/android/app/build/
+client-mobile/android/local.properties
+client-mobile/ios/App/Pods/
+client-mobile/ios/**/xcuserdata/
+*.dmg
+*.tar.gz
+build_tmp*/
+dist/
+data-local/

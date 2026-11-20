@@ -20,8 +20,9 @@ bash deploy.sh root@<VPS>  # 或登录 VPS 后直接 bash deploy.sh
 
 ```bash
 python tests.py            # 33 项，含 WS 二进制转发、RPC 双向、房间隔离、TURN 凭据算法
+python tests_regression.py # 15 项回归：重启后房间可连、RPC 不阻塞信令、房间级清理、越权防护
 ```
-真实网络链路（经 CA + 代理 + 真 TLS）：
+真实网络链路（经 CA + 代理 + 真 TLS，证书与代理自动生成、无需外部产物）：
 ```bash
 python ../tools/e2e_proxy_test.py   # ALL PASS
 ```

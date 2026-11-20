@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>远程桌面</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font:14px/1.5 system-ui;background:#0d1117;color:#e6edf3;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+header{padding:10px 12px;display:flex;gap:8px;align-items:center;background:#161b22;flex:none}
+header b{font-size:15px}
+#status{font-size:12px;color:#8b949e;margin-left:auto}
+#btnLogout{font-size:12px;padding:4px 10px;background:#21262d;border:1px solid #30363d;color:#8b949e;border-radius:6px;display:none}
+.panel{padding:16px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+input,button,select{font:14px system-ui;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;padding:10px 12px}
+button{background:#238636;border-color:#2ea043;color:#fff;font-weight:600}
+button.sec{background:#21262d;border-color:#30363d;color:#e6edf3}
+button.danger{background:#da3633;border-color:#f85149}
+button:disabled{opacity:.4}
+#stage{flex:1;position:relative;background:#000;display:none;touch-action:none;overflow:hidden}
+#view{position:absolute;inset:0;width:100%;height:100%;display:block}
+#hud{position:absolute;top:6px;right:8px;font-size:11px;color:#9ee493;background:rgba(0,0,0,.45);padding:2px 8px;border-radius:10px;pointer-events:none;z-index:2}
+#bar{flex:none;display:none;gap:6px;padding:8px;background:#161b22;flex-wrap:wrap}
+#bar button{padding:8px 10px;font-size:13px}
+#kbd{position:absolute;left:-9999px;opacity:0}
+#toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#1f6feb;color:#fff;padding:8px 16px;border-radius:20px;font-size:13px;display:none;z-index:9;white-space:nowrap}
+#sdModal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:10}
+#sdModal .box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;width:min(320px,86vw);display:flex;flex-direction:column;gap:12px;text-align:center}
+.dev{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 12px;border:1px solid #30363d;border-radius:10px;background:#161b22;margin-bottom:10px}
+.dev.clickable{cursor:pointer;border-color:#2ea04366}
+.dev.clickable:active{background:#1c2430}
+.dev .info{display:flex;align-items:center;gap:10px;min-width:0}
+.dev .icon{font-size:22px;flex:none}
+.dev .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dev .meta{font-size:12px;color:#8b949e}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px}
+.on{background:#3fb950}.off{background:#8b949e}
+.tag{font-size:11px;padding:1px 7px;border-radius:9px;border:1px solid #30363d;color:#8b949e;margin-left:6px}
+.tag.self{border-color:#1f6feb;color:#58a6ff}
+.go{font-size:13px;color:#3fb950;flex:none}
+small{color:#8b949e}
+h3{font-size:13px;color:#8b949e;font-weight:400;margin:4px 0 8px}
+</style>
+<header><b>🖥 远程桌面</b><span id="status">未登录</span><button id="btnLogout">退出</button></header>
+
+<div id="loginPanel" class="panel">
+  <small>登录后显示该账号下所有已安装客户端并登录的设备。<br>电脑端需先运行 Agent（同一手机号）。</small>
+  <input id="mobile" type="tel" placeholder="手机号" autocomplete="tel">
+  <button id="btnLogin">登录</button>
+</div>
+
+<div id="devPanel" class="panel" style="display:none">
+  <h3>我的设备 · 点击在线电脑打开远程桌面</h3>
+  <div id="devList"></div>
+  <button class="sec" id="btnRefresh">刷新设备</button>
+  <div id="hostRow" style="display:none;align-items:center;gap:10px;padding:12px;border:1px solid #30363d;border-radius:10px;background:#161b22">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input type="checkbox" id="chkAllow" style="width:18px;height:18px;padding:0"> 允许其他设备远程控制本机</label>
+    <small id="hostState" style="margin-left:auto"></small>
+  </div>
+  <small id="acct"></small>
+</div>
+
+<div id="stage"><canvas id="view"></canvas><div id="hud"></div><input id="kbd" autocomplete="off"></div>
+<div id="bar">
+  <select id="quality" title="画质">
+    <option value="1280,55">流畅</option>
+    <option value="1920,75">高清</option>
+    <option value="2560,80">超清</option>
+  </select>
+  <button class="sec" id="btnKbd">⌨️ 键盘</button>
+  <button class="sec" id="btnCtrl2Cmd" style="display:none">Ctrl→⌘ 开</button>
+  <button class="sec" data-combo="ctrl,c">复制</button>
+  <button class="sec" data-combo="ctrl,v">粘贴</button>
+  <button class="sec" data-combo="alt,tab">切窗</button>
+  <button class="sec" data-combo="win,d">桌面</button>
+  <button class="sec" id="btnRight">右键</button>
+  <button class="danger" id="btnShutdown">⏻ 关机</button>
+  <button class="sec" id="btnBack">← 设备</button>
+</div>
+
+<div id="toast"></div>
+<div id="sdModal"><div class="box">
+  <b id="sdTitle">确认远程关机？</b>
+  <small id="sdText">电脑将在 30 秒后关机，期间可撤销。请确认已保存工作。</small>
+  <button class="danger" id="sdGo">确认关机（30s 缓冲）</button>
+  <button class="sec" id="sdCancel">取消</button>
+</div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+// 客户端（Electron/Capacitor）内嵌本页时由宿主注入 RD_SERVER 指向 VPS；网页端为空走同源
+const SRV=(window.RD_SERVER||'').replace(/\/+$/,'');
+const api=async(p,b,t)=>{const r=await fetch(SRV+p,{method:'POST',headers:{'Content-Type':'application/json',...(t?{Authorization:'Bearer '+t}:{})},body:JSON.stringify(b||{})});return r.json()};
+let token=localStorage.getItem('rd_token')||null;
+let myDev=localStorage.getItem('rd_device')||null;
+let ws=null,room=null,devId=null,devName='',screenW=1,screenH=1,lastFrame=0,rightNext=false;
+let retry=0,reconnectTimer=null,manualClose=false,devTimer=null;
+const toast=(m,ms=2200)=>{const t=$('toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',ms)};
+const setStatus=m=>$('status').textContent=m;
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// 本机稳定指纹：同一设备重复登录不产生新设备；原生桌面端用机器级指纹（与内置 Agent 一致）
+let fp=localStorage.getItem('rd_fp');
+if(window.RD_PLATFORM==='pc'&&window.RD_FP)fp=window.RD_FP;
+if(!fp){fp='web-'+Math.random().toString(36).slice(2)+Date.now().toString(36);localStorage.setItem('rd_fp',fp)}
+const plat=()=>window.RD_PLATFORM||(/iPhone|iPad/i.test(navigator.userAgent)?'ios':/Android/i.test(navigator.userAgent)?'android':'mobile');
+const platName=p=>({pc:'电脑',windows:'Windows',mac:'macOS',linux:'Linux',mobile:'手机',ios:'iPhone',android:'Android',android_tv:'电视'}[p]||p);
+const platIcon=p=>(['pc','windows','mac','linux'].includes(p)?'🖥':p==='android_tv'?'📺':'📱');
+
+async function doLogin(m){
+  const r=await api('/api/v1/login/by_mobile',{mobile:m,register_device:1,uuid:fp,device_name:'本机·'+platName(plat()),platform:plat()});
+  if(r.code!==0){toast('登录失败: '+(r.msg||r.code));return false}
+  token=r.data.token;localStorage.setItem('rd_token',token);localStorage.setItem('rd_mobile',m);
+  if(r.data.device){myDev=r.data.device.device_id;localStorage.setItem('rd_device',myDev)}
+  syncHost();
+  showDevices();
+  return true;
+}
+// 原生客户端：把登录态同步给宿主，由宿主启动内置被控端（远控+被控一体）
+function syncHost(){
+  if(window.rdHost&&token)window.rdHost.setSession({server:SRV||location.origin,token,mobile:localStorage.getItem('rd_mobile')||'',name:window.RD_DEVNAME||'',allow:localStorage.getItem('rd_allow')!=='0'});
+}
+$('btnLogin').onclick=async()=>{
+  const m=$('mobile').value.trim();
+  if(!m)return toast('请输入手机号');
+  await doLogin(m);
+};
+$('mobile').value=localStorage.getItem('rd_mobile')||'';
+
+function showDevices(){
+  $('loginPanel').style.display='none';$('devPanel').style.display='flex';
+  $('btnLogout').style.display='';setStatus('已登录');
+  $('acct').textContent='账号 '+(localStorage.getItem('rd_mobile')||'');
+  loadDevices();
+  clearInterval(devTimer);devTimer=setInterval(loadDevices,8000); // 在线状态自动刷新
+}
+$('btnLogout').onclick=async()=>{
+  try{await api('/api/v1/user/logout',{},token)}catch(e){}
+  if(window.rdHost)window.rdHost.setSession(null);
+  localStorage.removeItem('rd_token');token=null;
+  clearInterval(devTimer);closeWs();
+  $('devPanel').style.display='none';$('loginPanel').style.display='flex';
+  $('btnLogout').style.display='none';setStatus('未登录');
+};
+
+async function loadDevices(){
+  if(!token)return;
+  let r;try{r=await api('/api/v1/device/list',{device_id:myDev},token)}catch(e){return}
+  if(r.code===1001){ // token 失效（另一端登出等）→ 回登录页
+    localStorage.removeItem('rd_token');token=null;clearInterval(devTimer);
+    $('devPanel').style.display='none';$('loginPanel').style.display='flex';
+    $('btnLogout').style.display='none';setStatus('登录已失效');return;
+  }
+  const list=(r.data&&r.data.list)||[];
+  const box=$('devList');box.innerHTML='';
+  if(!list.length)box.innerHTML='<small>暂无设备。在电脑上运行 Agent 并登录同一手机号后，这里会出现该电脑。</small>';
+  list.forEach(d=>{
+    const self=d.is_self||d.device_id===myDev;
+    const el=document.createElement('div');
+    el.className='dev'+(d.controllable&&!self?' clickable':'');
+    const state=d.online?'<span class="dot on"></span>在线':'<span class="dot off"></span>离线';
+    const last=d.online?'':(d.last_seen?' · 最后在线 '+new Date(d.last_seen).toLocaleString():'');
+    el.innerHTML=`<div class="info"><span class="icon">${platIcon(d.platform)}</span>
+      <div style="min-width:0"><div class="nm">${esc(d.device_name)}${self?'<span class="tag self">本机</span>':''}</div>
+      <div class="meta">${state} · ${esc(platName(d.platform))}${last}</div></div></div>
+      ${d.controllable&&!self?'<span class="go">远程桌面 ›</span>':(self?'':'<span class="meta go" style="color:#8b949e">'+(d.online?'仅客户端':'不可控制')+'</span>')}`;
+    if(d.controllable&&!self)el.onclick=()=>connect(d.device_id,d.device_name);
+    box.appendChild(el);
+  });
+}
+$('btnRefresh').onclick=loadDevices;
+
+function closeWs(){manualClose=true;clearTimeout(reconnectTimer);if(ws){try{ws.close()}catch(e){}ws=null}}
+
+async function connect(id,name){
+  devId=id;devName=name||id;manualClose=false;retry=0;
+  await openRoom();
+}
+async function openRoom(){
+  let r;try{r=await api('/api/v1/room/join/by_device/'+devId,{},token)}catch(e){r={code:-1,msg:'网络错误'}}
+  if(r.code!==0){toast('连接失败: '+(r.msg||r.code));scheduleReconnect();return}
+  room=r.data;
+  const wsBase=(SRV||location.origin).replace(/^http/,'ws');
+  const url=wsBase+`/ws/signaling?token=${room.token}&device_id=${myDev||('phone-'+Date.now())}`;
+  ws=new WebSocket(url);ws.binaryType='arraybuffer';
+  ws.onopen=()=>{
+    retry=0;setStatus('已连接 '+devName);
+    $('devPanel').style.display='none';$('stage').style.display='block';$('bar').style.display='flex';
+    clearInterval(devTimer);
+    fitCanvas();
+    const [w,q]=($('quality').value||'1280,55').split(',').map(Number);
+    send({p:'stream.config',width:w,quality:q,fps:15});
+    send({p:'stream.resume'});
+    focusKbd(); // 桌面端进房即接管物理键盘，无需先点「键盘」按钮
+  };
+  ws.onclose=()=>{if(!manualClose){setStatus('连接断开，重连中…');scheduleReconnect()}};
+  ws.onerror=()=>{};
+  ws.onmessage=onMsg;
+}
+// 指数退避自动重连：1s→2s→4s→…封顶 15s
+function scheduleReconnect(){
+  if(manualClose)return;
+  clearTimeout(reconnectTimer);
+  const delay=Math.min(15000,1000*Math.pow(2,retry++));
+  setStatus(`断线，${Math.round(delay/1000)}s 后重连`);
+  reconnectTimer=setTimeout(openRoom,delay);
+}
+// ---- Canvas 渲染：只画最新帧（解码积压时丢旧帧，延迟不累积）----
+const view=$('view'),vctx=view.getContext('2d',{alpha:false,desynchronized:true});
+let pendingBlob=null,decoding=false,fpsCnt=0,fpsVal=0,lastHud=0,lastOwd=null;
+function fitCanvas(){
+  const r=view.getBoundingClientRect(),dpr=Math.min(2,devicePixelRatio||1);
+  const w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
+  if(view.width!==w||view.height!==h){view.width=w;view.height=h}
+}
+addEventListener('resize',fitCanvas);
+function drawLatest(){
+  if(!pendingBlob||decoding)return;
+  const blob=pendingBlob;pendingBlob=null;decoding=true;
+  createImageBitmap(blob).then(bmp=>{
+    screenW=bmp.width;screenH=bmp.height;
+    fitCanvas();
+    const cw=view.width,ch=view.height;
+    const s=Math.min(cw/screenW,ch/screenH);
+    const dw=screenW*s,dh=screenH*s;
+    vctx.fillStyle='#000';vctx.fillRect(0,0,cw,ch);
+    vctx.imageSmoothingEnabled=true;vctx.imageSmoothingQuality='high';
+    vctx.drawImage(bmp,(cw-dw)/2,(ch-dh)/2,dw,dh);
+    bmp.close();
+  }).catch(()=>{}).finally(()=>{decoding=false;if(pendingBlob)drawLatest()});
+}
+setInterval(()=>{fpsVal=fpsCnt;fpsCnt=0;
+  if(ws&&ws.readyState===1&&lastFrame)$('hud').textContent=fpsVal+' fps · '+screenW+'×'+screenH+(lastOwd!=null?' · '+lastOwd+'ms':'');
+},1000);
+function onMsg(e){
+  if(e.data instanceof ArrayBuffer){
+    const b=new Uint8Array(e.data);
+    if(b.length>4&&b[0]===70&&b[1]===82&&b[2]===77&&b[3]===49){ // FRM1
+      let off=4,owd=null;
+      if(!(b[4]===0xFF&&b[5]===0xD8)&&b.length>12){ // FRM1+8B毫秒时戳+JPEG
+        const dv=new DataView(e.data);
+        const ts=Number(dv.getBigUint64(4));
+        owd=Math.max(0,Date.now()-ts);off=12;
+      }
+      if(owd!=null)lastOwd=owd;
+      pendingBlob=new Blob([b.slice(off)],{type:'image/jpeg'});
+      lastFrame=Date.now();fpsCnt++;
+      if(!decoding)drawLatest();
+      if(Date.now()-lastHud>3000){lastHud=Date.now();setStatus('● 实时 · '+devName)}
+    }
+  }else{
+    let m;try{m=JSON.parse(e.data)}catch(e){return}
+    if(m.p==='agent.hello'){screenW=m.screen.w;screenH=m.screen.h;remoteOs=m.os||'';applyCombos();toast('已连接 '+m.name+' ('+m.os+')'+(m.os==='Darwin'&&matchMedia('(pointer:fine)').matches?' · 物理键盘已接管':''))}
+    else if(m.p==='stream.config.ack')toast(`画质已切换 ${m.width}px · ${m.fps}fps`);
+    else if(m.p==='shutdown.state'){
+      if(m.state==='pending'){$('sdTitle').textContent='关机倒计时 '+m.remain+'s';$('sdGo').style.display='none';$('sdCancel').textContent='撤销关机';$('sdModal').style.display='flex'}
+      else{$('sdModal').style.display='none';toast(m.state==='cancelled'?'已撤销关机':m.state==='executing'?'正在关机…':'关机状态: '+m.state)}
+    }
+    else if(m.p==='agent.error')toast('Agent: '+m.err);
+  }
+}
+$('quality').value=localStorage.getItem('rd_quality')||'1280,55';
+$('quality').onchange=()=>{
+  const [w,q]=$('quality').value.split(',').map(Number);
+  localStorage.setItem('rd_quality',$('quality').value);
+  send({p:'stream.config',width:w,quality:q,fps:15});
+};
+const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))};
+
+// ---- 触摸 → 鼠标：单指移动=光标移动；轻点=左键；长按=右键；双指=滚轮 ----
+const stage=$('stage');
+let tStart=0,tMoved=false,longTimer=null,pinchY=null;
+const norm=e=>{
+  // 与 canvas letterbox 绘制几何一致（CSS 像素）
+  const r=view.getBoundingClientRect();
+  const scale=Math.min(r.width/screenW,r.height/screenH);
+  const dw=screenW*scale,dh=screenH*scale;
+  const ox=r.left+(r.width-dw)/2,oy=r.top+(r.height-dh)/2;
+  return {x:Math.min(1,Math.max(0,(e.clientX-ox)/dw)),y:Math.min(1,Math.max(0,(e.clientY-oy)/dh))};
+};
+stage.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  if(e.touches.length===2){pinchY=(e.touches[0].clientY+e.touches[1].clientY)/2;clearTimeout(longTimer);return}
+  const t=e.touches[0];tStart=Date.now();tMoved=false;
+  const p=norm(t);send({p:'input',t:'move',...p});
+  longTimer=setTimeout(()=>{if(!tMoved){send({p:'input',t:'click',btn:'right',...p});tMoved=true;navigator.vibrate&&navigator.vibrate(30)}},550);
+},{passive:false});
+stage.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(e.touches.length===2&&pinchY!=null){
+    const y=(e.touches[0].clientY+e.touches[1].clientY)/2;
+    const dy=y-pinchY;
+    if(Math.abs(dy)>12){send({p:'input',t:'scroll',dy:dy>0?3:-3});pinchY=y}
+    return;
+  }
+  const t=e.touches[0];tMoved=true;clearTimeout(longTimer);
+  send({p:'input',t:'move',...norm(t)});
+},{passive:false});
+stage.addEventListener('touchend',e=>{
+  e.preventDefault();clearTimeout(longTimer);pinchY=null;
+  if(!tMoved&&Date.now()-tStart<550){
+    const t=e.changedTouches[0],p=norm(t);
+    send({p:'input',t:'click',btn:rightNext?'right':'left',...p});rightNext=false;
+  }
+},{passive:false});
+// 桌面浏览器调试：鼠标直接映射
+stage.addEventListener('mousemove',e=>{if(e.buttons===0)send({p:'input',t:'move',...norm(e)})});
+stage.addEventListener('click',e=>{if(matchMedia('(pointer:fine)').matches)send({p:'input',t:'click',btn:rightNext?'right':'left',...norm(e)});rightNext=false});
+stage.addEventListener('contextmenu',e=>e.preventDefault());
+stage.addEventListener('wheel',e=>{e.preventDefault();send({p:'input',t:'scroll',dy:e.deltaY<0?3:-3})},{passive:false});
+
+$('btnRight').onclick=()=>{rightNext=true;toast('下一次点击 = 右键')};
+document.querySelectorAll('[data-combo]').forEach(b=>b.onclick=()=>send({p:'input',t:'key',combo:b.dataset.combo.split(',')}));
+
+// ---- 键盘：桌面物理键盘全量接管 + 手机软键盘 ----
+let remoteOs='',ctrlToCmd=localStorage.getItem('rd_ctrl2cmd')!=='0';
+const heldMods=new Set();
+const MODKEYS={Control:'ctrl',Shift:'shift',Alt:'alt',Meta:'win',OS:'win',Hyper:'win',Super:'win'};
+const KEYMAP={Enter:'enter',Backspace:'backspace',Tab:'tab',Escape:'esc',ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Delete:'delete',Insert:'insert',Home:'home',End:'end',PageUp:'pageup',PageDown:'pagedown',' ':'space',CapsLock:'capslock',ContextMenu:'apps',PrintScreen:'printscreen',ScrollLock:'scrolllock',Pause:'pause'};
+// 按被控端系统翻译修饰键：Windows 键盘控 Mac 时 Ctrl→⌘（可关）、Alt→Option、Win→⌘
+const xlatMod=m=>{
+  if(remoteOs==='Darwin')return m==='ctrl'?(ctrlToCmd?'command':'ctrl'):m==='alt'?'option':m==='win'?'command':'shift';
+  return m==='win'?'winleft':m;
+};
+const focusKbd=()=>{if(matchMedia('(pointer:fine)').matches&&$('stage').style.display!=='none')$('kbd').focus()};
+function applyCombos(){
+  const mac=remoteOs==='Darwin';
+  const defs=mac?[['command,c','⌘C 复制'],['command,v','⌘V 粘贴'],['command,tab','⌘Tab 切窗'],['f11','桌面']]
+              :[['ctrl,c','复制'],['ctrl,v','粘贴'],['alt,tab','切窗'],['winleft,d','桌面']];
+  document.querySelectorAll('#bar [data-combo]').forEach((b,i)=>{if(defs[i]){b.dataset.combo=defs[i][0];b.textContent=defs[i][1]}});
+  const t=$('btnCtrl2Cmd');t.style.display=mac?'':'none';
+  t.textContent=ctrlToCmd?'Ctrl→⌘ 开':'Ctrl→⌘ 关';
+}
+$('btnCtrl2Cmd').onclick=()=>{ctrlToCmd=!ctrlToCmd;localStorage.setItem('rd_ctrl2cmd',ctrlToCmd?'1':'0');applyCombos();toast(ctrlToCmd?'Windows Ctrl 组合键将按 Mac ⌘ 执行':'Ctrl 按 Mac 原生 Control 执行')};
+$('btnKbd').onclick=()=>$('kbd').focus();
+$('kbd').addEventListener('keydown',e=>{
+  if(e.isComposing||e.keyCode===229||e.key==='Unidentified')return; // IME 组词/软键盘交给 input 事件
+  if(MODKEYS[e.key]){ // 修饰键独立按下/抬起：支持按住 Shift 点选、按住 Ctrl 滚轮缩放等
+    e.preventDefault();
+    const m=MODKEYS[e.key];
+    if(!heldMods.has(m)){heldMods.add(m);send({p:'input',t:'keydown',k:xlatMod(m)})}
+    return;
+  }
+  if(e.key.length===1&&!e.ctrlKey&&!e.altKey&&!e.metaKey){
+    e.preventDefault();
+    // 有修饰键按住时走按键（如 ⌘+A 全选、Shift+字母），否则字符直达
+    if(heldMods.size)send({p:'input',t:'press',k:e.key.toLowerCase()});
+    else send({p:'input',t:'text',v:e.key});
+    return;
+  }
+  e.preventDefault();
+  const k=KEYMAP[e.key]||e.key.toLowerCase();
+  // 修饰键已通过 keydown 按住，这里只发主键，避免 hotkey 提前松开按住的修饰键
+  send({p:'input',t:'press',k});
+});
+$('kbd').addEventListener('keyup',e=>{
+  const m=MODKEYS[e.key];
+  if(m&&heldMods.has(m)){heldMods.delete(m);send({p:'input',t:'keyup',k:xlatMod(m)})}
+});
+$('kbd').addEventListener('input',e=>{if(e.data){send({p:'input',t:'text',v:e.data});$('kbd').value=''}});
+$('kbd').addEventListener('blur',()=>{
+  $('kbd').value='';
+  heldMods.forEach(m=>send({p:'input',t:'keyup',k:xlatMod(m)})); // 释放被控端按住的修饰键，防卡键
+  heldMods.clear();
+});
+addEventListener('pagehide',()=>{heldMods.forEach(m=>send({p:'input',t:'keyup',k:xlatMod(m)}))});
+// 桌面端：远程桌面内任意点击后自动收回键盘焦点（按钮/画质选择除外不影响其功能）
+document.addEventListener('click',()=>focusKbd());
+
+$('btnShutdown').onclick=()=>{$('sdTitle').textContent='确认远程关机？';$('sdText').textContent='电脑将在 30 秒后关机，期间可撤销。请确认已保存工作。';$('sdGo').style.display='';$('sdCancel').textContent='取消';$('sdModal').style.display='flex'};
+$('sdGo').onclick=()=>{send({p:'shutdown',delay:30});$('sdGo').style.display='none'};
+$('sdCancel').onclick=()=>{
+  if($('sdGo').style.display==='none')send({p:'shutdown',cancel:true});
+  $('sdModal').style.display='none';
+};
+$('btnBack').onclick=()=>{closeWs();$('stage').style.display='none';$('bar').style.display='none';showDevices()};
+// 帧流看门狗：4s 无帧提示
+setInterval(()=>{if(ws&&ws.readyState===1&&lastFrame&&Date.now()-lastFrame>4000)setStatus('⚠ 无画面')},2000);
+// 断网恢复 / 回到前台立即重连
+addEventListener('online',()=>{if(devId&&!manualClose&&(!ws||ws.readyState>1))openRoom()});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&devId&&!manualClose&&(!ws||ws.readyState>1))openRoom()});
+
+// ---- 原生客户端被控端开关与状态 ----
+if(window.rdHost){
+  $('hostRow').style.display='flex';
+  $('chkAllow').checked=localStorage.getItem('rd_allow')!=='0';
+  $('chkAllow').onchange=()=>{localStorage.setItem('rd_allow',$('chkAllow').checked?'1':'0');syncHost()};
+  window.rdHost.onState(s=>{
+    $('hostState').textContent=s==='running'?'🟢 被控服务运行中':s==='starting'?'启动中…':s==='error'?'🔴 异常（查看权限/日志）':'已关闭';
+    if(s==='running')loadDevices();
+  });
+  // 被控端注册的真实 device_id：以它为准标记「本机」，与设备列表完全对齐
+  window.rdHost.onDevice(id=>{myDev=id;localStorage.setItem('rd_device',id);loadDevices()});
+}
+// 已有 token：校验后直接进入设备列表（免重复登录）
+(async()=>{
+  if(!token)return;
+  const r=await api('/api/v1/user/info',{},token).catch(()=>null);
+  if(r&&r.code===0){syncHost();showDevices()}
+  else{localStorage.removeItem('rd_token');token=null}
+})();
+</script>
+</html>

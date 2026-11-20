@@ -49,13 +49,13 @@ def main() -> int:
     r = c.get("/healthz").json()
     check("healthz", r["ok"] is True, r)
 
-    # 2. 登录（同号二次登录应复用 uid，并换发 token）
+    # 2. 登录（同号二次登录复用 uid 与 token —— 多端共存，手机/Agent 不互相顶号）
     l1 = c.post("/api/v1/login/by_mobile", json={"mobile": "13800000001"}).json()
     check("login envelope", l1["code"] == 0 and l1["data"]["token"], l1)
     tok = l1["data"]["token"]
     uid = l1["data"]["uid"]
     l2 = c.post("/api/v1/login/by_mobile", json={"mobile": "13800000001"}).json()
-    check("login uid stable", l2["data"]["uid"] == uid and l2["data"]["token"] != tok,
+    check("login uid stable", l2["data"]["uid"] == uid and l2["data"]["token"] == tok,
           (uid, l2["data"]["uid"]))
     tok = l2["data"]["token"]
     h = {"Authorization": "Bearer " + tok}
@@ -145,6 +145,9 @@ def main() -> int:
                              subprotocols=["uu.v1"]) as wa:
         check("ws subprotocol echo", wa.accepted_subprotocol == "uu.v1", wa.accepted_subprotocol)
         with c2.websocket_connect(url + "&device_id=" + ph_id) as wb:
+            # 新成员进房时服务端向既有节点发 peer.join 通知，先消费掉
+            notice = json.loads(wa.receive_text())
+            check("peer join notice", notice.get("p") == "peer.join", notice)
             blob = bytes(range(32))
             wa.send_bytes(blob)
             got = wb.receive_bytes()
@@ -161,7 +164,8 @@ def main() -> int:
     check("capture recorded unknown", "/api/v1/some/unimplemented" in paths, paths)
 
     # 12. 房间隔离：不同房间的连接互不可见；坏 token 直接拒绝
-    room3 = c.post("/api/v1/room/create", json={"device_id": pc_id}, headers=h).json()["data"]
+    # mode=new 显式新建独立房间（默认 create/join 复用同设备房间）
+    room3 = c.post("/api/v1/room/create", json={"device_id": pc_id, "mode": "new"}, headers=h).json()["data"]
     with c.websocket_connect("/ws/signaling?token=%s&device_id=%s" % (rtok, pc_id)) as _w1:
         with c2.websocket_connect("/ws/signaling?token=%s&device_id=%s" % (room3["token"], pc_id)) as _w2:
             r1 = server.peers.get(room2["room_id"], {})

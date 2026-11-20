@@ -22,6 +22,7 @@ UU_DATA_DIR     sqlite 与 capture 目录，默认 ./data
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -71,14 +72,14 @@ CREATE TABLE IF NOT EXISTS users (
     uid TEXT PRIMARY KEY, mobile TEXT UNIQUE, nickname TEXT, token TEXT UNIQUE, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS devices (
     device_id TEXT PRIMARY KEY, uid TEXT, name TEXT, platform TEXT,
-    online INTEGER DEFAULT 0, last_seen INTEGER, created_at INTEGER);
+    online INTEGER DEFAULT 0, last_seen INTEGER, created_at INTEGER, fingerprint TEXT);
 CREATE TABLE IF NOT EXISTS rooms (
     room_id TEXT PRIMARY KEY, token TEXT UNIQUE, host_uid TEXT, device_id TEXT,
     mode TEXT, created_at INTEGER, closed INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rpc (
     id INTEGER PRIMARY KEY AUTOINCREMENT, target TEXT, source TEXT, p TEXT,
     need_response INTEGER, payload TEXT, status TEXT, response TEXT,
-    created_at INTEGER, updated_at INTEGER);
+    room_id TEXT, created_at INTEGER, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS idx_rpc_target ON rpc(target, status);
 """
 
@@ -91,6 +92,14 @@ class DB:
         self._lock = threading.Lock()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            # 旧库迁移：rpc 表补 room_id 列（房间级清理需要）
+            cols = [r["name"] for r in c.execute("PRAGMA table_info(rpc)")]
+            if "room_id" not in cols:
+                c.execute("ALTER TABLE rpc ADD COLUMN room_id TEXT")
+            # 旧库迁移：devices 表补 fingerprint 列（同账号设备去重）
+            dcols = [r["name"] for r in c.execute("PRAGMA table_info(devices)")]
+            if "fingerprint" not in dcols:
+                c.execute("ALTER TABLE devices ADD COLUMN fingerprint TEXT")
 
     def conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=10, isolation_level=None)
@@ -126,8 +135,23 @@ db = DB(DB_PATH)
 
 # room_id -> {device_id: [活跃 WebSocket]}；按房间隔离，避免不同房间之间串帧
 peers: Dict[str, Dict[str, List[WebSocket]]] = {}
-# room_token -> room_id
+# room_token -> room_id（缓存；重启后由 DB 回填）
 rooms_by_token: Dict[str, str] = {}
+
+
+def resolve_room(token: str) -> Optional[str]:
+    """token → room_id：先查内存缓存，未命中回退 DB（服务重启后房间仍可连），
+    命中后回填缓存。已关闭房间返回 None。"""
+    if not token:
+        return None
+    rid = rooms_by_token.get(token)
+    if rid:
+        return rid
+    row = db.one("SELECT room_id FROM rooms WHERE token=? AND closed=0", (token,))
+    if row:
+        rooms_by_token[token] = row["room_id"]
+        return row["room_id"]
+    return None
 # rpc_id -> (WebSocket, 请求方 device_id)，用于 WS 快路径回包
 rpc_sockets: Dict[int, WebSocket] = {}
 _lock = threading.Lock()
@@ -147,8 +171,11 @@ def bearer(authorization: Optional[str]) -> str:
     if not authorization:
         raise ValueError("missing authorization")
     parts = authorization.split(None, 1)
-    tok = parts[1] if len(parts) == 2 else parts[0]
-    row = db.one("SELECT * FROM users WHERE token=?", (tok.strip(),))
+    tok = (parts[1] if len(parts) == 2 else parts[0]).strip()
+    # 空 token（登出后置空）一律拒绝，避免匹配到已登出用户
+    if not tok:
+        raise ValueError("empty token")
+    row = db.one("SELECT * FROM users WHERE token=?", (tok,))
     if not row:
         raise ValueError("invalid token")
     return row["uid"]
@@ -248,12 +275,28 @@ def device_online(device_id: str) -> bool:
 
 # ---------------------------------------------------------------- 用户
 
+def _norm_mobile(mobile: str) -> str:
+    """归一化手机号：去空格/横线/括号，+86、0086、86 前缀统一去掉，
+    避免同一号码带国家码时被拆成两个账号（设备列表互相看不见）。"""
+    m = "".join(ch for ch in mobile.strip() if ch.isdigit())
+    for prefix in ("0086", "86"):
+        if len(m) > 11 and m.startswith(prefix):
+            m = m[len(prefix):]
+            break
+    return m or mobile.strip()
+
+
 async def _login(uid_hint: Optional[str], mobile: str) -> Dict[str, Any]:
+    mobile = _norm_mobile(mobile)
     row = db.one("SELECT * FROM users WHERE mobile=?", (mobile,))
     if row:
         uid = row["uid"]
-        token = secrets.token_urlsafe(32)
-        db.run("UPDATE users SET token=? WHERE uid=?", (token, uid))
+        # 多端共存：手机与电脑 Agent 用同一账号登录，不能互相顶掉 token。
+        # 沿用仍然有效的既有 token；仅无 token / 已登出吊销时才签发新 token。
+        token = row["token"] or ""
+        if not token or token.startswith("revoked-"):
+            token = secrets.token_urlsafe(32)
+            db.run("UPDATE users SET token=? WHERE uid=?", (token, uid))
     else:
         uid = "u" + uuid.uuid4().hex[:16]
         token = secrets.token_urlsafe(32)
@@ -270,7 +313,12 @@ async def login_by_mobile(request: Request) -> Any:
     mobile = str(body.get("mobile") or body.get("phone") or "").strip()
     if not mobile:
         return err(1002, "mobile required")
-    return envelope(0, "", await _login(None, mobile))
+    # 登录请求可携带本机指纹（uuid/device_name），顺带注册"本机"设备，
+    # 设备列表即可区分本机与其它已登录客户端
+    data = await _login(None, mobile)
+    if body.get("register_device") or body.get("uuid") or body.get("device_name"):
+        data["device"] = _register_device(data["uid"], body, str(body.get("platform") or "mobile"))
+    return envelope(0, "", data)
 
 
 @app.post("/api/v1/login/by_qrcode")
@@ -303,7 +351,9 @@ async def user_info(request: Request, authorization: Optional[str] = Header(None
 async def logout(request: Request, authorization: Optional[str] = Header(None)) -> Any:
     u = current_user(authorization)
     if u:
-        db.run("UPDATE users SET token=? WHERE uid=?", ("", u["uid"]))
+        # 置为不可猜测的随机串而非空串，保持 UNIQUE 约束且旧 token 立即失效
+        db.run("UPDATE users SET token=? WHERE uid=?",
+               ("revoked-" + secrets.token_urlsafe(24), u["uid"]))
     return envelope(0, "", {})
 
 
@@ -323,14 +373,24 @@ def _register_device(uid: str, body: Dict[str, Any], platform: str) -> Dict[str,
         if not seed.strip():
             seed = str(body.get("device_name") or body.get("name") or "") + uuid.uuid4().hex
         device_id = hashlib.md5(seed.encode()).hexdigest()
+    # 同一账号内按稳定指纹去重：同设备重复登录不再堆新行（跨账号仍防抢占）
+    fingerprint = str(body.get("uuid") or "").strip()
+    if fingerprint:
+        dup = db.one("SELECT * FROM devices WHERE uid=? AND fingerprint=?", (uid, fingerprint))
+        if dup:
+            device_id = dup["device_id"]
     name = str(body.get("device_name") or body.get("name") or platform)
     row = db.one("SELECT * FROM devices WHERE device_id=?", (device_id,))
+    if row and row["uid"] != uid:
+        # device_id 已被其他账号占用：不允许抢占，改用带 uid 种子的新 id
+        device_id = hashlib.md5((uid + ":" + device_id).encode()).hexdigest()
+        row = db.one("SELECT * FROM devices WHERE device_id=?", (device_id,))
     if row:
-        db.run("UPDATE devices SET uid=?,name=?,platform=?,last_seen=? WHERE device_id=?",
-               (uid, name, platform, now_ms(), device_id))
+        db.run("UPDATE devices SET uid=?,name=?,platform=?,last_seen=?,fingerprint=? WHERE device_id=?",
+               (uid, name, platform, now_ms(), fingerprint or row["fingerprint"], device_id))
     else:
-        db.run("INSERT INTO devices(device_id,uid,name,platform,online,last_seen,created_at)"
-               " VALUES(?,?,?,?,0,?,?)", (device_id, uid, name, platform, now_ms(), now_ms()))
+        db.run("INSERT INTO devices(device_id,uid,name,platform,online,last_seen,created_at,fingerprint)"
+               " VALUES(?,?,?,?,0,?,?,?)", (device_id, uid, name, platform, now_ms(), now_ms(), fingerprint))
     return {"device_id": device_id, "device_name": name, "platform": platform}
 
 
@@ -358,17 +418,37 @@ async def device_pc(request: Request, authorization: Optional[str] = Header(None
     return envelope(0, "", _register_device(u["uid"], await request.json(), "pc"))
 
 
+@app.post("/api/v1/device/mobile/init")
+async def device_mobile(request: Request, authorization: Optional[str] = Header(None)) -> Any:
+    """手机控制端注册"本机"：设备列表据此区分本机与可远程的电脑。"""
+    u = current_user(authorization)
+    if not u:
+        return err(1001, "invalid authorization")
+    return envelope(0, "", _register_device(u["uid"], await request.json(), "mobile"))
+
+
 @app.post("/api/v1/device/list")
 async def device_list(request: Request, authorization: Optional[str] = Header(None)) -> Any:
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
+    body: Dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    # 控制端可带上自己的 device_id，服务端标记 is_self，前端据此区分本机
+    self_id = str(body.get("device_id") or "")
     rows = db.all("SELECT * FROM devices WHERE uid=? ORDER BY created_at DESC", (u["uid"],))
     out = []
     for r in rows:
         live = bool(device_online(r["device_id"]))
+        # 可远程 = 电脑类客户端(pc) 且当前在线；手机/TV 端只出现在列表用于区分
+        controllable = live and r["platform"] in ("pc", "windows", "mac", "linux")
         out.append({"device_id": r["device_id"], "device_name": r["name"],
                     "platform": r["platform"], "online": 1 if live else 0,
+                    "is_self": 1 if r["device_id"] == self_id else 0,
+                    "controllable": 1 if controllable else 0,
                     "last_seen": r["last_seen"] or 0})
     return envelope(0, "", {"list": out, "devices": out})
 
@@ -376,9 +456,19 @@ async def device_list(request: Request, authorization: Optional[str] = Header(No
 # ---------------------------------------------------------------- 房间
 
 def _create_room(uid: str, device_id: str, mode: str) -> Optional[sqlite3.Row]:
-    dev = db.one("SELECT * FROM devices WHERE device_id=?", (device_id,))
+    # 只能给自己的设备建房，防止越权控制他人设备
+    dev = db.one("SELECT * FROM devices WHERE device_id=? AND uid=?", (device_id, uid))
     if not dev:
         return None
+    # 默认（join / create）复用该设备的最新未关闭房间：控制端与 Agent 必须同房
+    # 才能互通，Agent 断线重连也回原房间，避免堆房间导致控制端 join 进空房。
+    # mode="new" 显式新建独立房间（多会话/隔离场景）。
+    old = None if mode == "new" else db.one(
+        "SELECT * FROM rooms WHERE device_id=? AND host_uid=? AND closed=0"
+        " ORDER BY created_at DESC", (device_id, uid))
+    if old:
+        rooms_by_token[old["token"]] = old["room_id"]
+        return old
     room_id = uuid.uuid4().hex[:16]
     token = secrets.token_urlsafe(24)
     db.run("INSERT INTO rooms(room_id,token,host_uid,device_id,mode,created_at)"
@@ -404,7 +494,7 @@ async def room_join(device_id: str, request: Request, authorization: Optional[st
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
-    row = _create_room(u["uid"], device_id, "control")
+    row = _create_room(u["uid"], device_id, "join")
     if not row:
         return err(2001, "device not found")
     return envelope(0, "", room_config(row, u["uid"]))
@@ -416,9 +506,11 @@ async def room_refetch(request: Request, authorization: Optional[str] = Header(N
     if not u:
         return err(1001, "invalid authorization")
     body = await request.json()
-    row = db.one("SELECT * FROM rooms WHERE room_id=? AND closed=0", (str(body.get("room_id") or ""),))
+    row = db.one("SELECT * FROM rooms WHERE room_id=? AND host_uid=? AND closed=0",
+                 (str(body.get("room_id") or ""), u["uid"]))
     if not row:
         return err(2002, "room not found")
+    rooms_by_token[row["token"]] = row["room_id"]  # 重启后 refetch 即恢复信令映射
     return envelope(0, "", room_config(row, u["uid"]))
 
 
@@ -427,11 +519,18 @@ async def room_clear(room_id: str, request: Request, authorization: Optional[str
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
+    row = db.one("SELECT * FROM rooms WHERE room_id=? AND host_uid=?", (room_id, u["uid"]))
+    if not row:
+        return err(2002, "room not found")
     db.run("UPDATE rooms SET closed=1 WHERE room_id=?", (room_id,))
     for tok, rid in list(rooms_by_token.items()):
         if rid == room_id:
             rooms_by_token.pop(tok, None)
-    db.run("UPDATE rpc SET status='closed' WHERE status IN ('pending','delivered')")
+    # 只关闭本房间设备相关的在途 RPC，不影响其它房间
+    db.run("UPDATE rpc SET status='closed',updated_at=? WHERE room_id=? AND status IN ('pending','delivered')",
+           (now_ms(), room_id))
+    db.run("UPDATE rpc SET status='closed',updated_at=? WHERE room_id IS NULL AND target=? "
+           "AND status IN ('pending','delivered')", (now_ms(), row["device_id"]))
     return envelope(0, "", {"room_id": room_id})
 
 
@@ -446,28 +545,33 @@ async def rpc_request(device_id: str, request: Request, authorization: Optional[
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
+    # 目标设备必须属于当前用户
+    dev = db.one("SELECT * FROM devices WHERE device_id=? AND uid=?", (device_id, u["uid"]))
+    if not dev:
+        return err(2001, "device not found")
     body = await request.json()
     p = str(body.get("p") or "")
     need = 1 if body.get("need_response", True) else 0
     payload = dumps(body.get("data"))
     src = str(body.get("source_device_id") or body.get("device_id") or "")
-    cur = db.run("INSERT INTO rpc(target,source,p,need_response,payload,status,created_at,updated_at)"
-                 " VALUES(?,?,?,?,?,?,?,?)",
-                 (device_id, src, p, need, payload, "pending", now_ms(), now_ms()))
+    room_id = str(body.get("room_id") or "") or None
+    cur = db.run("INSERT INTO rpc(target,source,p,need_response,payload,status,room_id,created_at,updated_at)"
+                 " VALUES(?,?,?,?,?,?,?,?,?)",
+                 (device_id, src, p, need, payload, "pending", room_id, now_ms(), now_ms()))
     rid = int(cur.lastrowid)
 
-    # 快路径：目标设备在线且有 WS 通道时，通过 WS 推送（不阻塞 HTTP 响应线程的做法见下）
     if not need:
         return envelope(0, "", {"id": rid, "accepted": True})
 
-    deadline = time.time() + RPC_TIMEOUT
-    while time.time() < deadline:
-        row = db.one("SELECT * FROM rpc WHERE id=?", (rid,))
+    # 用 asyncio.sleep 让出事件循环：等待期间 WS 信令与其它请求不受影响
+    deadline = time.monotonic() + RPC_TIMEOUT
+    while time.monotonic() < deadline:
+        row = await asyncio.to_thread(db.one, "SELECT * FROM rpc WHERE id=?", (rid,))
         if row and row["status"] == "done":
             return envelope(0, "", {"id": rid, "code": 0, "data": json.loads(row["response"] or "null")})
         if row and row["status"] == "closed":
             return err(2003, "room closed")
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     db.run("UPDATE rpc SET status='timeout',updated_at=? WHERE id=?", (now_ms(), rid))
     return err(2004, "device no response")
 
@@ -478,6 +582,8 @@ async def rpc_poll(device_id: str, authorization: Optional[str] = Header(None), 
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
+    if not db.one("SELECT 1 FROM devices WHERE device_id=? AND uid=?", (device_id, u["uid"])):
+        return err(2001, "device not found")
     db.run("UPDATE devices SET online=1,last_seen=? WHERE device_id=?", (now_ms(), device_id))
     rows = db.all("SELECT * FROM rpc WHERE target=? AND status='pending' ORDER BY id LIMIT ?",
                   (device_id, limit))
@@ -494,6 +600,8 @@ async def rpc_respond(device_id: str, request: Request, authorization: Optional[
     u = current_user(authorization)
     if not u:
         return err(1001, "invalid authorization")
+    if not db.one("SELECT 1 FROM devices WHERE device_id=? AND uid=?", (device_id, u["uid"])):
+        return err(2001, "device not found")
     body = await request.json()
     rid = int(body.get("id") or 0)
     data = body.get("data")
@@ -528,7 +636,7 @@ async def signaling(ws: WebSocket) -> None:
     """
     token = ws.query_params.get("token") or ws.query_params.get("room_token") or ""
     device_id = ws.query_params.get("device_id") or ""
-    room_id = rooms_by_token.get(token)
+    room_id = resolve_room(token)
     if not room_id:
         await ws.close(code=4002)
         return
@@ -539,7 +647,15 @@ async def signaling(ws: WebSocket) -> None:
     peer_id = device_id or (room["device_id"] if room else "")
     with _lock:
         peers.setdefault(room_id, {}).setdefault(peer_id, []).append(ws)
+        existing = [w for devs in [peers.get(room_id, {})] for lst in devs.values()
+                    for w in lst if w is not ws]
     db.run("UPDATE devices SET online=1,last_seen=? WHERE device_id=?", (now_ms(), peer_id))
+    # 通知房内既有节点有新成员（Agent 据此重发 hello；纯透传客户端可忽略此文本帧）
+    for w in existing:
+        try:
+            await w.send_text(dumps({"p": "peer.join", "device_id": peer_id}))
+        except Exception:
+            pass
 
     try:
         while True:
@@ -611,6 +727,21 @@ async def room_list(authorization: Optional[str] = Header(None)) -> Any:
     return envelope(0, "", {"list": [{"room_id": r["room_id"], "device_id": r["device_id"],
                                       "mode": r["mode"], "created_at": r["created_at"]}
                                      for r in rows]})
+
+
+@app.get("/control", include_in_schema=False)
+async def control_page() -> Any:
+    """手机 H5 控制页：登录 → 选设备 → 建房 → WS 收帧/发输入/关机。
+    纯静态单页，无外部依赖；帧流与输入均经既有 WS 二进制透明中继。"""
+    from fastapi.responses import HTMLResponse
+    # PyInstaller onefile 运行时资源解包到 sys._MEIPASS
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    html_path = base / "control.html"
+    if not html_path.exists():
+        html_path = Path(__file__).parent / "control.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>control.html missing</h1>", status_code=500)
 
 
 @app.get("/admin", include_in_schema=False)

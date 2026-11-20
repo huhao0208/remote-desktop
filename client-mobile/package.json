@@ -1,0 +1,17 @@
+{
+  "name": "uu-remote-mobile",
+  "version": "1.0.0",
+  "description": "远程桌面控制端移动客户端（Android APK / iOS Xcode 工程）",
+  "scripts": {
+    "sync": "node scripts/sync-web.js",
+    "cap": "npm run sync && cap sync"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}

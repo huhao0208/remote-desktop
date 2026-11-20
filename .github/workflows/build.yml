@@ -1,0 +1,316 @@
+# 自动打包：四平台「服务端 + 客户端」安装包 + 测试门禁
+#
+# 触发：push main / 打 v* tag / 手动
+# 产物（每平台一个包，内含 uu-server + uu-agent 双二进制与部署文件）：
+#   uu-remote-windows-x64.zip      Windows：uu-server.exe + uu-agent.exe
+#   uu-remote-macos-arm64.tar.gz   macOS Apple Silicon
+#   uu-remote-macos-x64.tar.gz     macOS Intel
+#   uu-remote-linux-x64.tar.gz     Linux（VPS 免 Docker 备选）
+#   uu-remote-android-termux.tar.gz  Android(Termux) 源码运行包（服务端+Agent）
+#   uu-remote-universal.tar.gz     全平台通用源码包（Python 3.10+）
+#
+# 角色说明：
+#   uu-server = 服务端（装 VPS/局域网机器，含手机 H5 控制页 /control）
+#   uu-agent  = 电脑被控端（Win/Mac/Linux，推屏+接受输入+可撤销关机）
+#   控制端客户端（内置服务器地址，装上即用，无需浏览器）：
+#     uu-remote-client-*.{exe,dmg,zip,AppImage}  桌面客户端（Electron）
+#     uu-remote-client-android.apk               安卓客户端（Capacitor）
+#     uu-remote-client-ios-project.zip           iOS Xcode 工程（需 Mac+签名出 ipa）
+#   手机控制端也可免安装 H5：https://<host>:8443/control
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # tag 触发时上传 Release 资产
+
+jobs:
+  # ------------------------------------------------ 测试门禁（先测后打包）
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install fastapi uvicorn websockets httpx mitmproxy cryptography
+      - name: Unit + integration tests
+        working-directory: srv2
+        run: python tests.py
+      - name: Regression tests
+        working-directory: srv2
+        run: python tests_regression.py
+      - name: E2E real-TLS via proxy
+        run: python tools/e2e_proxy_test.py
+
+  # ------------------------------------------------ 桌面/服务器独立二进制
+  binary:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            sep: ";"
+            ext: ".exe"
+            archive: zip
+          - os: macos-14          # Apple Silicon
+            name: macos-arm64
+            sep: ":"
+            ext: ""
+            archive: tar
+          - os: macos-13          # Intel
+            name: macos-x64
+            sep: ":"
+            ext: ""
+            archive: tar
+          - os: ubuntu-latest
+            name: linux-x64
+            sep: ":"
+            ext: ""
+            archive: tar
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install fastapi "uvicorn[standard]" pyinstaller mss pillow pyautogui httpx websockets
+      - name: Build standalone binaries (server + agent)
+        shell: bash
+        run: |
+          # 注意：--add-data 源路径相对 CWD（仓库根），不受 --specpath 影响
+          pyinstaller --onefile --name uu-server \
+            --collect-submodules uvicorn \
+            --hidden-import websockets \
+            --add-data "srv2/control.html${{ matrix.sep }}." \
+            --distpath dist --workpath build_tmp --specpath build_tmp \
+            srv2/server.py
+          pyinstaller --onefile --name uu-agent \
+            --collect-submodules mss \
+            --hidden-import pyautogui --hidden-import PIL \
+            --distpath dist --workpath build_tmp2 --specpath build_tmp2 \
+            agent/agent.py
+      - name: Stage package
+        shell: bash
+        run: |
+          mkdir -p pkg/server pkg/client
+          cp "dist/uu-server${{ matrix.ext }}" pkg/server/
+          cp "dist/uu-agent${{ matrix.ext }}" pkg/client/
+          cp srv2/control.html srv2/docker-compose.yml srv2/Dockerfile srv2/entrypoint.sh pkg/server/ 2>/dev/null || true
+          cp README.md pkg/
+          mkdir -p pkg/server/certs && touch pkg/server/certs/.gitkeep
+          cat > pkg/START.md <<'EOF'
+          # 一、服务端（VPS 或局域网任一机器）
+          方式 A（Docker，推荐）：
+            cd server
+            把 TLS 证书放到 certs/fullchain.pem 与 certs/privkey.pem
+            docker compose up -d --build
+          方式 B（独立二进制，免装 Python/Docker）：
+            cd server
+            证书放 certs/ 后：
+            UU_TLS_CERT=certs/fullchain.pem UU_TLS_KEY=certs/privkey.pem ./uu-server
+            （Windows: 先 set 环境变量再运行 uu-server.exe）
+          管理页 https://<host>:8443/admin
+
+          # 二、电脑客户端 / 被控端（Windows / macOS / Linux）
+          cd client
+          ./uu-agent --server https://<host>:8443 --mobile <手机号> --name MY-PC
+          macOS 需授予 屏幕录制 + 辅助功能 权限。
+          可选画质参数：--width 1920 --quality 75 --fps 15
+
+          # 三、手机控制端（Android / iOS 浏览器，免安装）
+          打开 https://<host>:8443/control 用同一手机号登录 → 设备列表 → 点电脑控制/关机
+          EOF
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path pkg/* -DestinationPath "uu-remote-${{ matrix.name }}.zip"
+      - name: Archive (tar)
+        if: matrix.archive == 'tar'
+        run: tar -czf "uu-remote-${{ matrix.name }}.tar.gz" -C pkg .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-${{ matrix.name }}
+          path: uu-remote-${{ matrix.name }}.*
+          retention-days: 30
+
+  # ------------------------------------------------ 移动端 / 通用源码包
+  source-packs:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Android (Termux) pack
+        run: |
+          mkdir -p pack-termux
+          cp srv2/server.py srv2/control.html srv2/tests.py srv2/tests_regression.py pack-termux/
+          cp agent/agent.py pack-termux/
+          cp packaging/run-termux.sh pack-termux/run.sh
+          cp srv2/README.md pack-termux/
+          chmod +x pack-termux/run.sh
+          tar -czf uu-remote-android-termux.tar.gz -C pack-termux .
+      - name: Universal source pack
+        run: |
+          mkdir -p pack-universal
+          cp -r srv2 tools agent pack-universal/
+          rm -rf pack-universal/srv2/data pack-universal/srv2/__pycache__
+          cp README.md packaging/run-anywhere.sh pack-universal/
+          chmod +x pack-universal/run-anywhere.sh
+          tar -czf uu-remote-universal.tar.gz -C pack-universal .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-mobile-and-universal
+          path: |
+            uu-remote-android-termux.tar.gz
+            uu-remote-universal.tar.gz
+          retention-days: 30
+
+  # ------------------------------------------------ 桌面控制端客户端（Electron）
+  desktop-client:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            build: "--win"
+          - os: macos-14
+            name: macos-arm64
+            build: "--mac --arm64"
+          - os: macos-13
+            name: macos-x64
+            build: "--mac --x64"
+          - os: ubuntu-latest
+            name: linux-x64
+            build: "--linux"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: client-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build embedded agent (被控端，随 App 一体分发)
+        shell: bash
+        run: |
+          pip install pyinstaller mss pillow pyautogui httpx websockets
+          pyinstaller --onefile --name uu-agent \
+            --collect-submodules mss \
+            --hidden-import pyautogui --hidden-import PIL \
+            --distpath client-desktop/bin --workpath build_tmp_agent --specpath build_tmp_agent \
+            agent/agent.py
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+      - name: Build client
+        run: npx electron-builder ${{ matrix.build }} --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-${{ matrix.name }}
+          path: |
+            client-desktop/release/*.exe
+            client-desktop/release/*.dmg
+            client-desktop/release/*.zip
+            client-desktop/release/*.AppImage
+          retention-days: 30
+
+  # ------------------------------------------------ 安卓控制端 APK（Capacitor）
+  android-apk:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install deps & sync web
+        run: |
+          npm install --no-audit --no-fund
+          node scripts/sync-web.js
+          npx cap sync android
+      - name: Build APK
+        working-directory: client-mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk uu-remote-client-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-android
+          path: client-mobile/uu-remote-client-android.apk
+          retention-days: 30
+
+  # ------------------------------------------------ iOS 控制端 Xcode 工程
+  # 未签名工程：需在有 Xcode 的 Mac 上打开、选签名团队后 Archive 出 ipa。
+  ios-project:
+    needs: test
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: client-mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deps & sync web
+        run: |
+          npm install --no-audit --no-fund
+          node scripts/sync-web.js
+          npx cap sync ios
+      - name: Zip Xcode project
+        run: |
+          cat > ios-README.txt <<'EOF'
+          iOS 客户端构建说明：
+          1. 在装有 Xcode 的 Mac 上解压本包
+          2. 打开 ios/App/App.xcworkspace
+          3. Signing & Capabilities 里选择你的 Team（个人 Apple ID 即可）
+          4. Product > Archive 导出 ipa，或直接连线安装到 iPhone
+          服务器地址已内置，无需配置。
+          EOF
+          zip -qry ../uu-remote-client-ios-project.zip ios ios-README.txt capacitor.config.json package.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-ios-project
+          path: uu-remote-client-ios-project.zip
+          retention-days: 30
+
+  # ------------------------------------------------ tag 时发布 Release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binary, source-packs, desktop-client, android-apk, ios-project]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

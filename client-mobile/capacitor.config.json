@@ -1,0 +1,11 @@
+{
+  "appId": "com.huhao.uuremote",
+  "appName": "UU远程桌面",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
