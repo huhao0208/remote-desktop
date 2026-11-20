@@ -21,6 +21,11 @@ button:disabled{opacity:.4}
 #stage{flex:1;position:relative;background:#000;display:none;touch-action:none;overflow:hidden}
 #view{position:absolute;inset:0;width:100%;height:100%;display:block}
 #vid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none;background:#000}
+#infoPanel{position:absolute;right:8px;top:34px;z-index:5;display:none;background:rgba(13,17,23,.94);
+  border:1px solid #30363d;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.9;min-width:210px}
+#infoPanel b{color:#8b949e;font-weight:500;display:inline-block;min-width:76px}
+#infoPanel .v{color:#e6edf3}
+button.on{border-color:#2ea043;color:#3fb950}
 #hud{position:absolute;top:6px;right:8px;font-size:11px;color:#9ee493;background:rgba(0,0,0,.45);padding:2px 8px;border-radius:10px;pointer-events:none;z-index:2}
 #bar{flex:none;display:none;gap:6px;padding:8px;background:#161b22;flex-wrap:wrap}
 #bar button{padding:8px 10px;font-size:13px}
@@ -62,7 +67,7 @@ h3{font-size:13px;color:#8b949e;font-weight:400;margin:4px 0 8px}
   <small id="acct"></small>
 </div>
 
-<div id="stage"><video id="vid" autoplay playsinline muted></video><canvas id="view"></canvas><div id="hud"></div><input id="kbd" autocomplete="off"></div>
+<div id="stage"><video id="vid" autoplay playsinline muted></video><audio id="aud" autoplay></audio><canvas id="view"></canvas><div id="hud"></div><input id="kbd" autocomplete="off"></div>
 <div id="bar">
   <select id="quality" title="画质">
     <option value="1280,55,4000">流畅 1280 · 4M</option>
@@ -75,11 +80,17 @@ h3{font-size:13px;color:#8b949e;font-weight:400;margin:4px 0 8px}
   <button class="sec" data-combo="ctrl,v">粘贴</button>
   <button class="sec" data-combo="alt,tab">切窗</button>
   <button class="sec" data-combo="win,d">桌面</button>
+  <select id="screenSel" title="显示器" style="display:none"></select>
+  <button class="sec" id="btnAudio" title="被控端声音">🔊 声音</button>
+  <button class="sec" id="btnClip" title="剪贴板双向同步">📋 剪贴板</button>
+  <button class="sec" id="btnWatch" title="只看不控，防误触">👁 观看</button>
+  <button class="sec" id="btnInfo" title="连接信息">ℹ️ 信息</button>
   <button class="sec" id="btnRight">右键</button>
   <button class="danger" id="btnShutdown">⏻ 关机</button>
   <button class="sec" id="btnBack">← 设备</button>
 </div>
 
+<div id="infoPanel"></div>
 <div id="toast"></div>
 <div id="sdModal"><div class="box">
   <b id="sdTitle">确认远程关机？</b>
@@ -221,8 +232,14 @@ function iceList(){
   return out;
 }
 async function startRTC(){
-  // 已在协商/已连上就不重复发起：hello 会在 peer.join 时重发，重复 offer 会互相踢
-  if(pc&&pc.connectionState&&['new','connecting','connected'].includes(pc.connectionState))return;
+  // 幂等：已连上就不重复协商；但「connecting 卡住超 6s」或 new 未发过 offer 要允许重来
+  if(pc){
+    const st=pc.connectionState;
+    const stuck=st==='connecting'&&(performance.now()-(rtcOfferAt||0)>6000);
+    if(st==='connected')return;
+    if(st==='connecting'&&!stuck)return;
+    if(st==='new'&&rtcOfferAt)return;
+  }
   stopRTC();
   try{
     pc=new RTCPeerConnection({iceServers:iceList(),bundlePolicy:'max-bundle',iceCandidatePoolSize:2});
@@ -233,6 +250,14 @@ async function startRTC(){
     tr.degradationPreference='maintain-resolution';
   }catch(e){pc.addTransceiver('video',{direction:'recvonly'})}
   pc.ontrack=e=>{
+    if(e.track&&e.track.kind==='audio'){
+      // 音频单独挂 <audio>，不进画面布局；静音只改本地元素，不打扰被控端
+      const aud=$('aud');
+      aud.srcObject=e.streams[0];
+      aud.muted=!audioOn;aud.play().catch(()=>{});
+      e.track.addEventListener('ended',()=>{});
+      return;
+    }
     vEl.srcObject=e.streams[0];
     vEl.style.display='block';view.style.display='none';
     vEl.play().catch(()=>{});
@@ -263,6 +288,7 @@ async function rtcStats(){
     s.forEach(r=>{
       if(r.type==='inbound-rtp'&&r.kind==='video')inb=r;
       if(r.type==='candidate-pair'&&r.state==='succeeded'&&r.nominated)pair=r;
+      if(r.type==='local-candidate'&&pair&&r.id===pair.localCandidateId)iceType=r.candidateType||'';
     });
   }catch(e){return}
   if(inb){
@@ -338,7 +364,12 @@ async function onMsg(e){
       screenW=m.screen.w;screenH=m.screen.h;remoteOs=m.os||'';applyCombos();
       toast('已连接 '+m.name+' ('+m.os+')'+(m.os==='Darwin'&&matchMedia('(pointer:fine)').matches?' · 物理键盘已接管':''));
       // Agent 支持 WebRTC 就走 H.264/UDP；否则沿用 JPEG 通路
-      if(m.media==='webrtc')startRTC();else stopRTC();
+      if(m.media==='webrtc'){if(!pc||pc.connectionState!=='connected')startRTC()}else stopRTC();
+      // v2 能力：有音频才显示声音按钮；多屏才显示选择器
+      $('btnAudio').style.display=m.audio?'':'none';
+      $('aud').style.display=m.audio?'':'none';
+      if(m.screens>1)$('screenSel').style.display='';
+      toast('已连接 '+m.name+' ('+m.os+')'+(m.audio?' · 含声音':''));
     }
     else if(m.p==='rtc.answer'){
       try{await pc.setRemoteDescription({type:'answer',sdp:m.sdp})}catch(e){toast('协商失败，回落 JPEG');stopRTC();return}
@@ -348,6 +379,21 @@ async function onMsg(e){
     }
     else if(m.p==='rtc.ice'&&pc){
       try{await pc.addIceCandidate({candidate:m.candidate,sdpMid:m.sdpMid,sdpMLineIndex:m.sdpMLineIndex})}catch(e){}
+    }
+    else if(m.p==='screens'){
+      screens=m.list||[];curScreen=m.current||0;
+      if(screens.length>1){
+        $('screenSel').style.display='';
+        $('screenSel').innerHTML=screens.map(sc=>`<option value="${sc.id}"${sc.id===curScreen?' selected':''}>${sc.name||('屏'+(sc.id+1))} ${sc.w}×${sc.h}</option>`).join('');
+      }
+    }
+    else if(m.p==='screen.selected'){
+      curScreen=m.id;toast('已切到 '+(screens.find(x=>x.id===m.id)?.name||('屏'+(m.id+1))));
+    }
+    else if(m.p==='clip'&&m.dir==='down'&&clipOn){
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(m.text).then(()=>toast('已同步到本机剪贴板')).catch(()=>toast('被控端复制了内容，点「剪贴板」可手动取回'));
+      }
     }
     else if(m.p==='stream.config.ack')toast(`画质已切换 ${m.width}px · ${m.fps}fps${m.bitrate?' · '+m.bitrate+'kbps':''}`);
     else if(m.p==='shutdown.state'){
@@ -364,6 +410,14 @@ $('quality').onchange=()=>{
   send({p:'stream.config',width:w,quality:q,fps:30,bitrate:br});
 };
 const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))};
+// ---- v2 状态 ----
+let audioOn=true, clipOn=false, watchOnly=false, screens=[], curScreen=0, iceType='';
+// 观看模式：本地拦截所有输入（不通知 Agent，省一次往返）
+const sendInput=o=>{
+  if(watchOnly&&String(o.p||'')==='input')return;
+  if(o.p==='input'&&heldMods.size)o.mods=[...heldMods].map(xlatMod);
+  send(o);
+};
 
 // ---- 触摸 → 鼠标：单指移动=光标移动；轻点=左键；长按=右键；双指=滚轮 ----
 const stage=$('stage');
@@ -380,35 +434,82 @@ stage.addEventListener('touchstart',e=>{
   e.preventDefault();
   if(e.touches.length===2){pinchY=(e.touches[0].clientY+e.touches[1].clientY)/2;clearTimeout(longTimer);return}
   const t=e.touches[0];tStart=Date.now();tMoved=false;
-  const p=norm(t);send({p:'input',t:'move',...p});
-  longTimer=setTimeout(()=>{if(!tMoved){send({p:'input',t:'click',btn:'right',...p});tMoved=true;navigator.vibrate&&navigator.vibrate(30)}},550);
+  const p=norm(t);sendInput({p:'input',t:'move',...p});
+  longTimer=setTimeout(()=>{if(!tMoved){sendInput({p:'input',t:'click',btn:'right',...p});tMoved=true;navigator.vibrate&&navigator.vibrate(30)}},550);
 },{passive:false});
 stage.addEventListener('touchmove',e=>{
   e.preventDefault();
   if(e.touches.length===2&&pinchY!=null){
     const y=(e.touches[0].clientY+e.touches[1].clientY)/2;
     const dy=y-pinchY;
-    if(Math.abs(dy)>12){send({p:'input',t:'scroll',dy:dy>0?3:-3});pinchY=y}
+    if(Math.abs(dy)>12){sendInput({p:'input',t:'scroll',dy:dy>0?3:-3});pinchY=y}
     return;
   }
   const t=e.touches[0];tMoved=true;clearTimeout(longTimer);
-  send({p:'input',t:'move',...norm(t)});
+  sendInput({p:'input',t:'move',...norm(t)});
 },{passive:false});
 stage.addEventListener('touchend',e=>{
   e.preventDefault();clearTimeout(longTimer);pinchY=null;
   if(!tMoved&&Date.now()-tStart<550){
     const t=e.changedTouches[0],p=norm(t);
-    send({p:'input',t:'click',btn:rightNext?'right':'left',...p});rightNext=false;
+    sendInput({p:'input',t:'click',btn:rightNext?'right':'left',...p});rightNext=false;
   }
 },{passive:false});
 // 桌面浏览器调试：鼠标直接映射
-stage.addEventListener('mousemove',e=>{if(e.buttons===0)send({p:'input',t:'move',...norm(e)})});
-stage.addEventListener('click',e=>{if(matchMedia('(pointer:fine)').matches)send({p:'input',t:'click',btn:rightNext?'right':'left',...norm(e)});rightNext=false});
+stage.addEventListener('mousemove',e=>{if(e.buttons===0)sendInput({p:'input',t:'move',...norm(e)})});
+stage.addEventListener('click',e=>{if(matchMedia('(pointer:fine)').matches)sendInput({p:'input',t:'click',btn:rightNext?'right':'left',...norm(e)});rightNext=false});
 stage.addEventListener('contextmenu',e=>e.preventDefault());
-stage.addEventListener('wheel',e=>{e.preventDefault();send({p:'input',t:'scroll',dy:e.deltaY<0?3:-3})},{passive:false});
+stage.addEventListener('wheel',e=>{e.preventDefault();sendInput({p:'input',t:'scroll',dy:e.deltaY<0?3:-3})},{passive:false});
 
 $('btnRight').onclick=()=>{rightNext=true;toast('下一次点击 = 右键')};
-document.querySelectorAll('[data-combo]').forEach(b=>b.onclick=()=>send({p:'input',t:'key',combo:b.dataset.combo.split(',')}));
+
+// ---- v2 按钮 ----
+$('btnAudio').onclick=()=>{
+  audioOn=!audioOn;const a=$('aud');a.muted=!audioOn;
+  if(audioOn)a.play().catch(()=>{});
+  $('btnAudio').classList.toggle('on',audioOn);
+  $('btnAudio').textContent=audioOn?'🔊 声音':'🔇 静音';
+};
+$('aud').style.display='none';
+$('btnAudio').classList.toggle('on',audioOn);
+$('btnAudio').textContent=audioOn?'🔊 声音':'🔇 静音'; // 只初始化文案，不触发切换
+$('btnClip').onclick=()=>{
+  clipOn=!clipOn;
+  $('btnClip').classList.toggle('on',clipOn);
+  send({p:'clip.sync',enable:clipOn});
+  toast(clipOn?'剪贴板已双向同步（复制文本即推送）':'剪贴板同步已关闭');
+};
+$('btnWatch').onclick=()=>{
+  watchOnly=!watchOnly;
+  $('btnWatch').classList.toggle('on',watchOnly);
+  toast(watchOnly?'观看模式：本地已拦截输入，防误触':'已恢复控制');
+};
+$('btnInfo').onclick=()=>{
+  const p=$('infoPanel');
+  if(p.style.display==='block'){p.style.display='none';return}
+  p.style.display='block';
+  const r=rtcStats||{};
+  p.innerHTML=[
+    ['编码',rtcOn?'H.264':'JPEG'],
+    ['分辨率',(r.w?r.w+'×'+r.h:'—')],
+    ['帧率',(r.fps||0)+' fps'],
+    ['码率',(rtcMbps||0).toFixed(2)+' Mbps'],
+    ['RTT',(rtcRtt==null?'—':rtcRtt+' ms')],
+    ['抖动缓冲',(r.jb==null?'—':r.jb+' ms')],
+    ['丢帧',(r.dropped||0)],
+    ['ICE',iceType||'—'],
+    ['音频',audioOn?'开':'静音'],
+    ['模式',watchOnly?'观看':'控制']
+  ].map(([k,v])=>`<div><b>${k}</b><span class="v">${v}</span></div>`).join('');
+};
+$('screenSel').onchange=e=>{send({p:'screen.select',id:Number(e.target.value)})};
+// 剪贴板上行：控制端复制时把选中文本推给被控端
+document.addEventListener('copy',()=>{
+  if(!clipOn)return;
+  const t=String(getSelection?getSelection():'');
+  if(t&&t.length<=262144)send({p:'clip',dir:'up',text:t});
+});
+document.querySelectorAll('[data-combo]').forEach(b=>b.onclick=()=>sendInput({p:'input',t:'key',combo:b.dataset.combo.split(',')}));
 
 // ---- 键盘：桌面物理键盘全量接管 + 手机软键盘 ----
 let remoteOs='',ctrlToCmd=localStorage.getItem('rd_ctrl2cmd')!=='0';
@@ -432,6 +533,7 @@ function applyCombos(){
 $('btnCtrl2Cmd').onclick=()=>{ctrlToCmd=!ctrlToCmd;localStorage.setItem('rd_ctrl2cmd',ctrlToCmd?'1':'0');applyCombos();toast(ctrlToCmd?'Windows Ctrl 组合键将按 Mac ⌘ 执行':'Ctrl 按 Mac 原生 Control 执行')};
 $('btnKbd').onclick=()=>$('kbd').focus();
 $('kbd').addEventListener('keydown',e=>{
+  if(watchOnly)return; // 观看模式不发送任何按键
   if(e.isComposing||e.keyCode===229||e.key==='Unidentified')return; // IME 组词/软键盘交给 input 事件
   if(MODKEYS[e.key]){ // 修饰键独立按下/抬起：支持按住 Shift 点选、按住 Ctrl 滚轮缩放等
     e.preventDefault();

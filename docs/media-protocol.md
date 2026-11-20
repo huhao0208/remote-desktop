@@ -182,3 +182,95 @@ WebRTC 默认按「视频通话」优化：码率 1–3 Mbps、拥塞时降分�
 - [ ] 拔网线 → `connectionState` 变 failed → 自动回落 JPEG → 恢复后重协商
 - [ ] 老 Agent（不发 `media`）仍可用
 - [ ] `tests.py` 34 项 + `tests_regression.py` 23 项全绿
+---
+
+# 协议 v2 扩展（2026-11-20 追加，FROZEN）
+
+> 目标：补齐「体验最佳」缺的能力。所有新消息**仍然走现有 WS**，服务端依旧零改动。
+> 与 v1 完全向后兼容：老 Agent 不发/不收这些消息，页面按能力降级。
+
+## 1. 音频（Agent → 控制端）
+
+- Agent 在**同一条 `RTCPeerConnection`** 上增加一个 audio track（Opus，48 kHz，单声道，`echoCancellation:false`）
+- `agent.hello` 增加字段：
+
+```json
+{"p":"agent.hello", "media":"webrtc", "audio": true, "screens": 2}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `audio` | `true` = 本会话会有音频轨（控制端 `<audio autoplay>` 播放） |
+| `screens` | 显示器数量（见 §3） |
+
+- 控制端：`pc.ontrack` 里判断 `event.track.kind === 'audio'` → 挂到隐藏 `<audio>` 元素，不参与画面布局
+- 静音开关：控制端本地 `audio.muted = !enabled`（**不**通知 Agent，省一次往返）
+- Agent 侧采集：macOS 用 `sounddevice`/`pyaudio` 抓默认输出（loopback 需 BlackHole 之类虚拟设备，首版只支持「麦克风/系统默认输入」，系统内录作为 TODO 标注）
+
+## 2. 剪贴板双向同步
+
+```json
+{"p":"clip", "dir":"up",   "text":"..."}   // 控制端 → Agent：写入被控端剪贴板
+{"p":"clip", "dir":"down", "text":"..."}   // Agent → 控制端：被控端剪贴板变化
+{"p":"clip.sync", "enable": true}          // 控制端开/关同步
+```
+
+- Agent 侧：读取用 `pbpaste`（macOS）/`Get-Clipboard`（Windows）/`xclip -o`（Linux）；写入用 `pbcopy`/`Set-Clipboard`/`xclip -i`
+- 轮询间隔 800 ms，**内容 md5 去重**，只推变化；超过 256 KB 的文本不传（避免大段代码卡链路）
+- 控制端开启同步前必须先有用户手势（浏览器 clipboard 权限要求）
+- 两端都要做**回环抑制**：写入动作打标记，5 秒内同一内容不再回推
+
+## 3. 多显示器
+
+```json
+{"p":"screens", "current":0, "list":[
+  {"id":0,"w":2048,"h":1280,"x":0,"y":0,"name":"内建","primary":true},
+  {"id":1,"w":1920,"h":1080,"x":2048,"y":0,"name":"外接","primary":false}
+]}
+{"p":"screen.select", "id":1}
+{"p":"screen.selected", "id":1}          // Agent 确认，下一帧生效（强制关键帧）
+```
+
+- `agent.hello` 之后立即推一次 `screens`
+- 切换后 Agent 必须**重建视频轨**（分辨率变了），控制端无感（WebRTC 自动重协商）
+- 控制端 UI：工具栏显示当前屏，多屏时点开选择
+
+## 4. 修饰键状态机（修正 v1 语义）
+
+v1 的 `keydown/keyup` 只发单键，被控端按一下就抬起，导致 Shift 多选、Ctrl+滚轮失效。v2 明确：
+
+```json
+{"p":"input","t":"keydown","k":"shift"}          // 按下并**保持**
+{"p":"input","t":"keyup",  "k":"shift"}          // 释放
+{"p":"input","t":"key","combo":["ctrl","c"]}     // 原子组合键（按下→释放全序列）
+{"p":"input","t":"scroll","dy":-3,"mods":["ctrl"]}   // 带修饰键的滚轮
+```
+
+- Agent 维护 `pressed_mods: set`，所有 `move/click/scroll` 事件都带上当前修饰状态
+- 控制端失焦（`blur`/`visibilitychange`）必须发送**全部 keyup**，避免远端卡住 Shift
+
+## 5. 画质与连接信息（UI 用，复用现有消息）
+
+```json
+{"p":"stream.config","width":1920,"fps":30,"bitrate":8000,"audio":true}
+{"p":"stats","ts":1795177000000,"fps":17,"mbps":0.4,"rtt":3,"jb":22,"dropped":0,
+ "enc":"h264","w":1920,"h":1200,"audio":true}
+```
+
+- `stats` 由控制端本地采集即可（`pc.getStats()`），**不需要 Agent 参与**；此条仅为将来「被控端也上报」预留，v2 不实现
+- 控制端「连接信息面板」展示：编码、分辨率、fps、码率、RTT、抖动缓冲、丢帧、ICE 类型（host/srflx/relay）
+
+## 6. 观看模式 / 隐私屏
+
+```json
+{"p":"view.only","enable":true}       // 控制端只渲染，不发 input（本地拦截，不通知 Agent）
+{"p":"privacy","enable":true}         // Agent 用纯色遮罩覆盖被控屏（本地窗口 + 暂停推流）
+```
+
+## 7. 验收补充（v2）
+
+- [ ] 有音频时 CPU 增幅 < 15%，延迟 < 200 ms
+- [ ] 剪贴板：控制端复制 → 被控端 5 s 内可粘贴；反向同理；不出现回环抖动
+- [ ] 多屏：切换后画面分辨率跟着变，不需要重连
+- [ ] Shift 长按 + 点击可多选；失焦后远端不卡修饰键
+- [ ] 连接信息面板数值与 HUD 一致
