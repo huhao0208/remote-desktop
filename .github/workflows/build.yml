@@ -334,7 +334,12 @@ jobs:
       - run: flutter analyze --fatal-infos
       - run: flutter test
 
-  # macOS 桌面 App（runner 自带 Xcode；产物是 .app 目录，upload-artifact 会自动打包）
+  # macOS 桌面 App（runner 自带 Xcode）
+  # 必须先在本地打成 zip 再上传：直接传 *.app（目录）时，release job 用
+  # download-artifact merge-multiple 合并后只剩目录条目，action-gh-release
+  # 会把它当成一个几十 KB 的「假文件」发出去（v0.1.0 里的 uu_remote 就是这个），
+  # 用户下载后既不是 zip 也解不出 .app。ditto 是 macOS 原生打包工具，
+  # --keepParent 保证解压后是 uu_remote.app/ 完整包结构（保 xattr/资源分叉）。
   flutter-build-macos:
     needs: flutter-verify
     runs-on: macos-latest
@@ -350,10 +355,20 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build macos --release
+      - name: Package .app into zip
+        run: |
+          set -euo pipefail
+          APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | head -n 1)"
+          echo "packaging: $APP_PATH"
+          # 产物落在仓库根，路径与其它 job 的资产名保持一致，release job 直接 artifacts/* 收走
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$APP_PATH" "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
+          ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
+          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" | head -n 5
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-macos
-          path: client-flutter/build/macos/Build/Products/Release/*.app
+          path: uu-remote-client-flutter-macos.zip
           retention-days: 30
 
   # Linux 桌面 App：runner 需先装 GTK/CMake 工具链
@@ -374,10 +389,20 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build linux --release
+      - name: Package bundle into tarball
+        # 同 macOS：bundle 是目录，直接上传会与 merge-multiple 打架，
+        # v0.1.0 的 Release 里 Linux 桌面包因此整个丢失（既没有 tar 也没有目录条目）。
+        # tar 而非 zip 是为了保住可执行位。
+        run: |
+          set -euo pipefail
+          tar -czf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" \
+            -C build/linux/x64/release bundle
+          ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz"
+          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" | head -n 5
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-linux
-          path: client-flutter/build/linux/x64/release/bundle
+          path: uu-remote-client-flutter-linux.tar.gz
           retention-days: 30
 
   # Android APK：未配正式签名，release 包用 debug key 签名（可装可跑，不能上架）
