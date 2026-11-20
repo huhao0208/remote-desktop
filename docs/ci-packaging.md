@@ -173,11 +173,11 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-windows-x64.zip` | 84 MB | Windows 做服务端或被控端（`uu-server.exe` / `uu-agent.exe`） |
+| `uu-remote-windows-x64.zip` | 85 MB | Windows 做服务端或被控端（`uu-server.exe` / `uu-agent.exe`） |
 | `uu-remote-macos-arm64.tar.gz` | 66 MB | Apple Silicon Mac（M 系列）；CI 只产出 arm64，Intel Mac 需自行 `pyinstaller`（见 §2） |
-| `uu-remote-linux-x64.tar.gz` | 138 MB | Linux VPS / NAS 免 Docker 部署（也含被控端） |
-| `uu-remote-android-termux.tar.gz` | 40 KB | 安卓手机 Termux 里直接跑源码（无预编译二进制，需 `pip install`） |
-| `uu-remote-universal.tar.gz` | 55 KB | 任意平台源码包（Python 3.10+），排查问题/改代码用 |
+| `uu-remote-linux-x64.tar.gz` | 139 MB | Linux VPS / NAS 免 Docker 部署（也含被控端） |
+| `uu-remote-android-termux.tar.gz` | 53 KB | 安卓手机 Termux 里直接跑源码（无预编译二进制，需 `pip install`） |
+| `uu-remote-universal.tar.gz` | 96 KB | 任意平台源码包（Python 3.10+），排查问题/改代码用 |
 
 服务端二进制**不含证书**：自己把 TLS 证书放到 `server/certs/fullchain.pem`、
 `privkey.pem`，否则 `uu-server` 起不来（或走 Docker Compose 挂载）。
@@ -195,7 +195,7 @@ v0.1.1 的 macOS 包是 18 MB zip / 53 MB 解包，带上 agent 后变成约 82 
 | `uu-remote-client-flutter-macos.zip` | 约 82 MB（解包 121 MB） | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
 | `uu-remote-client-flutter-windows.zip` | 约 89 MB（解包 118 MB） | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
 | `uu-remote-client-flutter-linux.tar.gz` | 约 121 MB | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
-| `uu-remote-client-flutter-android.apk` | 约 42 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
+| `uu-remote-client-flutter-android.apk` | 约 88 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
 
 被控端首次运行需要在系统里授权：macOS 给「屏幕录制 + 辅助功能」，Windows/Linux 视系统而定。
 
