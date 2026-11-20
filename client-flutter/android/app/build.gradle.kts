@@ -1,3 +1,8 @@
+// 注意：必须显式 import。KTS 里 `java` 已经被 Gradle 的 java 扩展占用，
+// 写 `java.util.Properties()` 会报 Unresolved reference 'util'（CI 真实踩到）。
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -9,9 +14,9 @@ plugins {
 // 用户点「升级」只会得到「应用未安装」。CI 从 secrets 还原 key.properties + keystore；
 // 本地没有这个文件时自动回退 debug 签名（行为与之前完全一致，不阻断构建）。
 val keystorePropertiesFile = rootProject.file("key.properties")
-val keystoreProperties = java.util.Properties()
+val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {

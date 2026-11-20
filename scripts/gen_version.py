@@ -26,6 +26,14 @@ import re
 import sys
 from pathlib import Path
 
+# Windows runner 的默认 stdout 是 cp1252，打印中文会直接 UnicodeEncodeError
+# （binary job 的 windows 上真实踩到过）。脚本自己兜住，不依赖 CI 设 PYTHONIOENCODING。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
 
