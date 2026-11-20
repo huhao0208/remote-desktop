@@ -1,0 +1,5 @@
+# 预览截图脚本依赖真实网络与本机字体，默认跳过
+# 出图：flutter test --run-skipped test/_preview_test.dart
+tags:
+  preview:
+    skip: "预览截图脚本，用 --run-skipped 显式运行"

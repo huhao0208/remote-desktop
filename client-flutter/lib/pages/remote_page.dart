@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../core/api_client.dart';
 import '../core/app_config.dart';
@@ -15,8 +17,14 @@ import '../media/jpeg_transport.dart';
 import '../media/media_factory.dart';
 import '../media/media_transport.dart';
 import '../signaling/signaling_client.dart';
+import '../widgets/ui_kit.dart';
 
 /// 远控页：加入房间 → 连信令 → 等 `agent.hello` → 渲染画面 + 转发输入。
+///
+/// UI 分三层：
+/// 1. 顶栏：设备名 + 连接状态（细，不抢画面）；
+/// 2. 舞台：画面 + 中断/等待浮层；
+/// 3. 底部工具栏：毛玻璃浮层，全屏时自动隐藏，鼠标移到底部再出现。
 class RemotePage extends StatefulWidget {
   const RemotePage({required this.device, super.key});
 
@@ -36,11 +44,16 @@ class _RemotePageState extends State<RemotePage> {
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<FramePacket>? _frameSub;
   Timer? _ticker;
+  Timer? _chromeTimer;
 
   bool _connecting = true;
   String? _error;
   bool _stalled = false;
   bool _applyingHello = false;
+
+  bool _fullscreen = false;
+  bool _chromeVisible = true;
+  bool _keyboardLock = true;
 
   QualityPreset _quality = AppConfig.qualityPresets[AppConfig.defaultQualityIndex];
   int _fps = 0;
@@ -60,11 +73,13 @@ class _RemotePageState extends State<RemotePage> {
   DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
   Size _screen = const Size(1920, 1080);
 
+  bool get _isDesktop => !(Platform.isAndroid || Platform.isIOS);
+
   @override
   void initState() {
     super.initState();
     _api = ApiClient(baseUrl: Settings.serverBase);
-    _quality = QualityPreset.fromValue(Settings.qualityValue);
+    _quality = _resolvePreset(QualityPreset.fromValue(Settings.qualityValue).value);
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
     _connect();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -75,6 +90,7 @@ class _RemotePageState extends State<RemotePage> {
   @override
   void dispose() {
     _ticker?.cancel();
+    _chromeTimer?.cancel();
     _longPress?.cancel();
     _msgSub?.cancel();
     _frameSub?.cancel();
@@ -83,6 +99,8 @@ class _RemotePageState extends State<RemotePage> {
       _signaling?.sendJson(InputEvent.keyUp(mod));
     }
     _heldMods.clear();
+    // 退出页面时若仍在全屏，恢复窗口，避免把整个 App 卡在全屏
+    if (_fullscreen) _setFullscreen(false);
     _transport?.dispose();
     _signaling?.close();
     _api.close();
@@ -268,6 +286,54 @@ class _RemotePageState extends State<RemotePage> {
       ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 2)));
   }
 
+  // ------------------------------------------------------------ 桌面外壳
+
+  /// 全屏切换。桌面走 window_manager，移动端走系统沉浸式。
+  Future<void> _setFullscreen(bool on) async {
+    setState(() {
+      _fullscreen = on;
+      _chromeVisible = true;
+    });
+    if (_isDesktop) {
+      try {
+        await windowManager.setFullScreen(on);
+      } catch (_) {
+        // 插件不可用时忽略：不影响远控主流程
+      }
+    } else {
+      await SystemChrome.setEnabledSystemUIMode(
+        on ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
+    }
+    if (on) _scheduleChromeHide();
+  }
+
+  /// 全屏时鼠标静止一会儿自动收起工具栏，把画面让出来。
+  void _scheduleChromeHide() {
+    _chromeTimer?.cancel();
+    if (!_fullscreen) return;
+    _chromeTimer = Timer(const Duration(milliseconds: 2200), () {
+      if (mounted) setState(() => _chromeVisible = false);
+    });
+  }
+
+  void _pokeChrome() {
+    if (!_fullscreen) return;
+    if (!_chromeVisible) setState(() => _chromeVisible = true);
+    _scheduleChromeHide();
+  }
+
+  Future<void> _sendClipboardText() async {
+    final ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+    final String? text = data?.text;
+    if (text == null || text.isEmpty) {
+      _toast('剪贴板里没有文字');
+      return;
+    }
+    _send(InputEvent.text(text));
+    _toast('已发送 ${text.length} 个字符');
+  }
+
   // ------------------------------------------------------------ 输入
 
   void _send(Map<String, dynamic> event) {
@@ -307,6 +373,7 @@ class _RemotePageState extends State<RemotePage> {
 
   void _onPointerDown(PointerDownEvent event, Size box) {
     _focusNode.requestFocus();
+    _pokeChrome();
     if (event.buttons == kSecondaryMouseButton) {
       final Offset p = _normalize(event.localPosition, box);
       _send(InputEvent.click(p.dx, p.dy, btn: 'right'));
@@ -329,6 +396,7 @@ class _RemotePageState extends State<RemotePage> {
   }
 
   void _onPointerMove(PointerMoveEvent event, Size box) {
+    _pokeChrome();
     final Offset? down = _downAt;
     if (down != null && (event.localPosition - down).distance > 6) {
       _dragged = true;
@@ -361,13 +429,43 @@ class _RemotePageState extends State<RemotePage> {
     }
   }
 
+  /// 快捷键先拦截本机操作，再透传给被控端。
+  bool _handleShortcut(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final bool ctrl = HardwareKeyboard.instance.isControlPressed;
+    final bool meta = HardwareKeyboard.instance.isMetaPressed;
+    final bool alt = HardwareKeyboard.instance.isAltPressed;
+    final LogicalKeyboardKey key = event.logicalKey;
+
+    if (key == LogicalKeyboardKey.f11) {
+      _setFullscreen(!_fullscreen);
+      return true;
+    }
+    if (key == LogicalKeyboardKey.escape && _fullscreen) {
+      _setFullscreen(false);
+      return true;
+    }
+    if ((ctrl || meta) && !alt && (key == LogicalKeyboardKey.keyV)) {
+      _sendClipboardText();
+      return true;
+    }
+    if ((ctrl || meta) && key == LogicalKeyboardKey.f5) {
+      _reconnect();
+      return true;
+    }
+    return false;
+  }
+
   void _handleKey(KeyEvent event) {
+    if (_handleShortcut(event)) return;
+
     if (event is KeyUpEvent) {
       final String? mod = RemoteKeyMapper.modifierName(event.logicalKey);
       if (mod != null && _heldMods.remove(mod)) _send(InputEvent.keyUp(mod));
       return;
     }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return;
+    if (!_keyboardLock) return;
 
     final String? mod = RemoteKeyMapper.modifierName(event.logicalKey);
     if (mod != null) {
@@ -392,117 +490,251 @@ class _RemotePageState extends State<RemotePage> {
 
   @override
   Widget build(BuildContext context) {
+    final bool wide = Breakpoints.isMedium(context);
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
+        top: !_fullscreen,
+        bottom: !_fullscreen,
         child: Column(
           children: <Widget>[
-            _topBar(context),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              child: (_fullscreen && !_chromeVisible) ? const SizedBox(width: double.infinity) : _topBar(wide),
+            ),
             Expanded(child: _stage()),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOut,
+              child: (_fullscreen && !_chromeVisible)
+                  ? const SizedBox(width: double.infinity)
+                  : _bottomBar(wide),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _topBar(BuildContext context) {
-    final bool wide = MediaQuery.sizeOf(context).width >= 760;
+  Widget _topBar(bool wide) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      height: 46,
+      padding: const EdgeInsets.symmetric(horizontal: AppSpace.sm),
       decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border(bottom: BorderSide(color: AppColors.border)),
+        color: AppColors.videoChrome,
+        border: Border(bottom: BorderSide(color: AppColors.videoChromeBorder)),
       ),
       child: Row(
         children: <Widget>[
           IconButton(
-            tooltip: '返回设备列表',
+            tooltip: '返回设备列表（Esc）',
             onPressed: () => Navigator.of(context).maybePop(),
             icon: const Icon(Icons.arrow_back, size: 20),
           ),
-          Flexible(
+          StatusDot(
+            color: _statusColor(),
+            pulse: _transport != null && !_stalled,
+            size: 7,
+          ),
+          const SizedBox(width: AppSpace.sm),
+          Expanded(
             child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
               children: <Widget>[
                 Text(
                   widget.device.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, height: 1.2),
                 ),
                 Text(
                   _statusText(),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 11, color: _statusColor()),
+                  style: TextStyle(fontSize: 10.5, color: _statusColor(), height: 1.3),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 8),
-          if (wide) ...<Widget>[
-            _hudChip('$_fps fps'),
-            if (_hello != null && _hello!.width > 0)
-              _hudChip('${_hello!.width}×${_hello!.height}'),
-            if (_latency > Duration.zero) _hudChip('${_latency.inMilliseconds}ms'),
-            if (_transport != null) _hudChip(_transport!.kind == 'jpeg' ? 'JPEG 临时' : 'H.264'),
-            const SizedBox(width: 6),
-          ],
+          if (wide) ..._hud(),
           _qualitySelector(),
           IconButton(
-            tooltip: '重新连接',
-            onPressed: _reconnect,
-            icon: const Icon(Icons.refresh, size: 20),
+            tooltip: _fullscreen ? '退出全屏（F11）' : '全屏（F11）',
+            onPressed: () => _setFullscreen(!_fullscreen),
+            icon: Icon(_fullscreen ? Icons.fullscreen_exit : Icons.fullscreen, size: 20),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            onSelected: (String v) {
+              if (v == 'reconnect') _reconnect();
+              if (v == 'close') Navigator.of(context).maybePop();
+            },
+            itemBuilder: (BuildContext ctx) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                value: 'reconnect',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.refresh, size: 18, color: AppColors.videoMuted),
+                  title: Text('重新连接'),
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'close',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.link_off, size: 18, color: AppColors.danger),
+                  title: Text('断开连接', style: TextStyle(color: AppColors.danger)),
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _hudChip(String text) {
-    return Container(
-      margin: const EdgeInsets.only(right: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceAlt,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Text(text, style: const TextStyle(fontSize: 11, color: AppColors.muted)),
-    );
+  List<Widget> _hud() {
+    final AgentHello? hello = _hello;
+    return <Widget>[
+      HudChip(text: '$_fps fps', icon: Icons.speed, color: _fps >= 24 ? AppColors.accentHover : AppColors.videoMuted),
+      if (hello != null && hello.width > 0)
+        HudChip(text: '${hello.width}×${hello.height}', icon: Icons.aspect_ratio),
+      if (_latency > Duration.zero)
+        HudChip(
+          text: '${_latency.inMilliseconds}ms',
+          icon: Icons.network_ping,
+          color: _latency.inMilliseconds < 80
+              ? AppColors.accentHover
+              : (_latency.inMilliseconds < 180 ? AppColors.warn : AppColors.danger),
+        ),
+      if (_transport != null)
+        HudChip(
+          text: _transport!.kind == 'jpeg' ? 'JPEG 兜底' : 'H.264',
+          icon: _transport!.kind == 'jpeg' ? Icons.warning_amber_rounded : Icons.bolt,
+          color: _transport!.kind == 'jpeg' ? AppColors.warn : AppColors.accentHover,
+        ),
+      const SizedBox(width: AppSpace.xs),
+    ];
   }
 
   Widget _qualitySelector() {
-    return DropdownButtonHideUnderline(
-      child: DropdownButton<QualityPreset>(
-        value: _selectedPreset(),
-        isDense: true,
-        dropdownColor: AppColors.surfaceAlt,
-        borderRadius: BorderRadius.circular(8),
-        style: const TextStyle(fontSize: 12, color: AppColors.text),
-        icon: const Icon(Icons.tune, size: 16, color: AppColors.muted),
-        items: AppConfig.qualityPresets
-            .map((QualityPreset p) => DropdownMenuItem<QualityPreset>(
-                  value: p,
-                  child: Text(p.label),
-                ))
-            .toList(),
-        onChanged: (QualityPreset? preset) {
-          if (preset == null) return;
-          setState(() => _quality = preset);
-          Settings.setQualityValue(preset.value);
-          _applyQuality();
-        },
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: AppSpace.xs),
+      padding: const EdgeInsets.only(left: 10, right: 4),
+      decoration: BoxDecoration(
+        color: AppColors.videoBg,
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+        border: Border.all(color: AppColors.videoChromeBorder),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<QualityPreset>(
+          value: _selectedPreset(),
+          isDense: true,
+          dropdownColor: AppColors.videoChrome,
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          style: const TextStyle(fontSize: 11.5, color: AppColors.videoText),
+          icon: const Icon(Icons.expand_more, size: 15, color: AppColors.videoMuted),
+          items: AppConfig.qualityPresets
+              .map((QualityPreset p) => DropdownMenuItem<QualityPreset>(
+                    value: p,
+                    child: Text(p.label),
+                  ))
+              .toList(),
+          onChanged: (QualityPreset? preset) {
+            if (preset == null) return;
+            setState(() => _quality = preset);
+            Settings.setQualityValue(preset.value);
+            _applyQuality();
+          },
+        ),
       ),
     );
   }
 
-  QualityPreset _selectedPreset() {
+  /// 把持久化档位对齐到预设列表里的实际对象（Dropdown 的 value 必须命中 items）。
+  QualityPreset _resolvePreset(String value) {
     for (final QualityPreset p in AppConfig.qualityPresets) {
-      if (p.value == _quality.value) return p;
+      if (p.value == value) return p;
     }
     return AppConfig.qualityPresets[AppConfig.defaultQualityIndex];
+  }
+
+  QualityPreset _selectedPreset() => _resolvePreset(_quality.value);
+
+  /// 底部工具条：常用远控操作，全屏时会自动隐藏。
+  Widget _bottomBar(bool wide) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: AppSpace.md, vertical: AppSpace.sm),
+      decoration: const BoxDecoration(
+        color: AppColors.videoChrome,
+        border: Border(top: BorderSide(color: AppColors.videoChromeBorder)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: <Widget>[
+                  ToolButton(
+                    icon: Icons.keyboard_alt_outlined,
+                    tooltip: _keyboardLock ? '键盘已接管（点击暂停）' : '键盘已暂停（点击接管）',
+                    active: _keyboardLock,
+                    onPressed: () => setState(() => _keyboardLock = !_keyboardLock),
+                  ),
+                  ToolButton(
+                    icon: Icons.content_paste,
+                    tooltip: '粘贴本机剪贴板（⌘/Ctrl+V）',
+                    onPressed: _sendClipboardText,
+                  ),
+                  ToolButton(
+                    icon: Icons.security,
+                    tooltip: '发送 Ctrl+Alt+Del',
+                    onPressed: () {
+                      _send(<String, dynamic>{'p': 'input', 't': 'key', 'combo': <String>['ctrl', 'alt', 'delete']});
+                    },
+                  ),
+                  const _Divider(),
+                  ToolButton(
+                    icon: Icons.fullscreen,
+                    tooltip: '全屏（F11）',
+                    active: _fullscreen,
+                    onPressed: () => _setFullscreen(!_fullscreen),
+                  ),
+                  ToolButton(
+                    icon: Icons.refresh,
+                    tooltip: '重新连接（⌘/Ctrl+F5）',
+                    onPressed: _reconnect,
+                  ),
+                  ToolButton(
+                    icon: Icons.link_off,
+                    tooltip: '断开并返回',
+                    danger: true,
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (wide) _inputHint(),
+        ],
+      ),
+    );
+  }
+
+  Widget _inputHint() {
+    final bool touch = !_isDesktop;
+    return Padding(
+      padding: const EdgeInsets.only(left: AppSpace.sm),
+      child: Text(
+        touch ? '轻点左键 · 长按右键 · 双指滚动' : '⌘/Ctrl+V 粘贴 · F11 全屏 · 右键=右键菜单',
+        style: const TextStyle(color: AppColors.videoMuted, fontSize: 10.5),
+      ),
+    );
   }
 
   String _statusText() {
@@ -514,19 +746,19 @@ class _RemotePageState extends State<RemotePage> {
     if (_stalled) return '画面中断，等待新帧…';
     final AgentHello? hello = _hello;
     if (hello == null) return '已连接';
-    return '实时 · ${hello.name}（${hello.os}）· ${hello.isWebRtc ? 'WebRTC' : 'JPEG 兜底'}';
+    return '实时 · ${hello.name}（${hello.os}）· ${hello.isWebRtc ? 'WebRTC 直连' : 'JPEG 兜底'}';
   }
 
   Color _statusColor() {
     if (_error != null) return AppColors.danger;
     if (_stalled) return AppColors.warn;
     if (_transport != null) return AppColors.accent;
-    return AppColors.muted;
+    return AppColors.videoMuted;
   }
 
   Widget _stage() {
     if (_connecting) {
-      return const MediaPlaceholder(text: '正在加入房间并连接信令…');
+      return const LoadingView(text: '正在加入房间并连接信令…');
     }
     final String? error = _error;
     if (error != null) return _errorView(error);
@@ -560,7 +792,18 @@ class _RemotePageState extends State<RemotePage> {
               children: <Widget>[
                 ColoredBox(color: Colors.black, child: _buildVideo()),
                 if (_stalled) _stalledOverlay(),
-                Positioned(left: 12, bottom: 12, child: _inputHint()),
+                // 全屏收起工具栏时，只有底部一小条热区负责唤出
+                if (_fullscreen && !_chromeVisible)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: 36,
+                    child: MouseRegion(
+                      onEnter: (_) => _pokeChrome(),
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -572,78 +815,93 @@ class _RemotePageState extends State<RemotePage> {
   Widget _buildVideo() {
     final MediaTransport? transport = _transport;
     if (transport == null) {
-      return MediaPlaceholder(
-        text: _signaling?.isOpen == true
-            ? '信令已连接，等待被控端上线并发送 agent.hello…'
-            : '信令未连接，点右上角重试',
-      );
+      return _waitingView();
     }
     return transport.buildView(fit: BoxFit.contain);
   }
 
-  Widget _stalledOverlay() {
+  /// 首帧未到：给出分阶段提示，而不是一直转圈。
+  Widget _waitingView() {
+    final bool signalingUp = _signaling?.isOpen == true;
     return Center(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: AppColors.surface.withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.warn.withValues(alpha: 0.6)),
-        ),
-        child: const Row(
+      child: GlassPanel(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpace.xl, vertical: AppSpace.lg),
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(Icons.wifi_off, size: 16, color: AppColors.warn),
-            SizedBox(width: 8),
-            Text('画面中断，等待新帧…', style: TextStyle(color: AppColors.warn, fontSize: 12.5)),
+            const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(height: AppSpace.md),
+            Text(
+              signalingUp ? '等待被控端画面…' : '信令未连接',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              signalingUp ? '已进入房间，等待 Agent 发送 agent.hello' : '点右上角重连，或检查服务端地址',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 11.5, color: AppColors.videoMuted, height: 1.5),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _inputHint() {
-    final bool touch = Theme.of(context).platform == TargetPlatform.android ||
-        Theme.of(context).platform == TargetPlatform.iOS;
-    return IgnorePointer(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.45),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          touch ? '拖动移动光标 · 轻点左键 · 长按右键' : '鼠标/键盘已接管 · 滚轮=滚动 · 右键=右键',
-          style: const TextStyle(color: AppColors.muted, fontSize: 11),
+  Widget _stalledOverlay() {
+    return Align(
+      alignment: Alignment.topCenter,
+      child: Padding(
+        padding: const EdgeInsets.only(top: AppSpace.lg),
+        child: GlassPanel(
+          borderColor: AppColors.warn.withValues(alpha: 0.5),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.wifi_off, size: 15, color: AppColors.warn),
+              const SizedBox(width: AppSpace.sm),
+              const Text('画面中断，等待新帧…', style: TextStyle(color: AppColors.warn, fontSize: 12)),
+              const SizedBox(width: AppSpace.md),
+              InkWell(
+                onTap: _reconnect,
+                child: const Text('重连', style: TextStyle(color: AppColors.info, fontSize: 12)),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _errorView(String message) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const Icon(Icons.link_off, color: AppColors.danger, size: 40),
-            const SizedBox(height: 14),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.muted, height: 1.6),
-            ),
-            const SizedBox(height: 18),
-            ElevatedButton(onPressed: _reconnect, child: const Text('重新连接')),
-            const SizedBox(height: 10),
-            TextButton(
-              onPressed: () => Navigator.of(context).maybePop(),
-              child: const Text('返回设备列表'),
-            ),
-          ],
-        ),
+    return EmptyState(
+      icon: Icons.link_off,
+      title: '连接失败',
+      message: message,
+      action: Column(
+        children: <Widget>[
+          ElevatedButton.icon(
+            onPressed: _reconnect,
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('重新连接'),
+          ),
+          const SizedBox(height: AppSpace.sm),
+          TextButton(onPressed: () => Navigator.of(context).maybePop(), child: const Text('返回设备列表')),
+        ],
       ),
+    );
+  }
+}
+
+class _Divider extends StatelessWidget {
+  const _Divider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 20,
+      margin: const EdgeInsets.symmetric(horizontal: AppSpace.sm),
+      color: AppColors.videoChromeBorder,
     );
   }
 }
