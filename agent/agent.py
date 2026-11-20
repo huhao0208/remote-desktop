@@ -17,13 +17,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
+import os
 import platform
+import re
 import ssl
 import subprocess
 import sys
 import time
+import uuid
+from pathlib import Path
 
 import httpx
 import mss
@@ -44,6 +49,64 @@ FRAME_MAGIC = b"FRM1"
 def _new_mss():
     """mss 10 起 mss.mss() 被弃用（会往日志里刷 DeprecationWarning）。"""
     return mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+
+
+# ---------------------------------------------------------------- 设备身份
+
+def _device_id_path():
+    """device_id 落盘位置：~/.uu-agent/device_id（Windows 在 %APPDATA%\\uu-agent）。"""
+    if SYSTEM == "Windows":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return Path(base) / "uu-agent" / "device_id"
+    return Path(os.path.expanduser("~")) / ".uu-agent" / "device_id"
+
+
+def _valid_device_id(s: str) -> bool:
+    return bool(re.fullmatch(r"[0-9A-Za-z_-]{8,64}", (s or "").strip()))
+
+
+def resolve_device_id(arg_id: str | None, new_device: bool, fp: str) -> tuple[str, str]:
+    """算出本机稳定 device_id，返回 (id, 来源)。
+
+    优先级：`--device-id` > 持久化文件 > 机器指纹派生 > 随机。
+    必须跨进程稳定：服务端按 device_id 去重，每次换 id 就会在用户设备列表里堆一条。
+    """
+    path = _device_id_path()
+    if arg_id and _valid_device_id(arg_id):
+        did = arg_id.strip()
+        _save_device_id(path, did)
+        print(f"[agent] 使用 --device-id 指定设备 id={did}", flush=True)
+        return did, "arg"
+
+    if not new_device:
+        try:
+            if path.exists():
+                did = path.read_text(encoding="utf-8").strip()
+                if _valid_device_id(did):
+                    print(f"[agent] 复用设备 id={did}（如需重新注册请加 --new-device）", flush=True)
+                    return did, "file"
+        except Exception as e:
+            print(f"[agent] 读取 {path} 失败（{e}），改用派生 id", flush=True)
+
+    if new_device:
+        did = uuid.uuid4().hex
+        print(f"[agent] --new-device：注册新设备 id={did}", flush=True)
+    else:
+        did = hashlib.md5(f"uu-agent:{fp}".encode()).hexdigest()
+        print(f"[agent] 按机器指纹派生设备 id={did}", flush=True)
+    if _save_device_id(path, did):
+        print(f"[agent] 设备 id 已写入 {path}（下次启动复用）", flush=True)
+    return did, "new"
+
+
+def _save_device_id(path, did: str) -> bool:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(did + "\n", encoding="utf-8")
+        return True
+    except Exception as e:
+        print(f"[agent] 写 {path} 失败（{e}），本次仍用该 id 但不持久", flush=True)
+        return False
 
 
 # ---------------------------------------------------------------- 输入注入
@@ -285,10 +348,10 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         verify.check_hostname = False
         verify.verify_mode = ssl.CERT_NONE
 
-    # 稳定指纹：机器名+系统+MAC 派生，重装/改名前保持不变，
-    # 服务端按指纹去重，同账号重复登录不产生重复设备。
-    import uuid as _uuid
-    fp = f"{platform.node()}-{SYSTEM}-{_uuid.getnode():x}"
+    # 稳定指纹：机器名+系统+MAC 派生。注意 macOS 上 uuid.getnode() 拿不到 MAC 时
+    # 会退化成随机值，指纹就变了 —— 所以设备 id 必须落盘，不能只靠指纹。
+    fp = f"{platform.node()}-{SYSTEM}-{uuid.getnode():x}"
+    want_id, id_src = resolve_device_id(args.device_id, args.new_device, fp)
 
     async with httpx.AsyncClient(base_url=args.server, verify=verify, timeout=15) as hc:
         if args.token:
@@ -304,10 +367,11 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             tok = login["data"]["token"]
         h = {"Authorization": "Bearer " + tok}
         plat = "pc"
-        # 重连时带上已知 device_id，即使服务端是旧版也不产生重复设备行。
+        # 重连/重启都带上固定 device_id：服务端按 device_id/指纹去重，不再每起一次多一条设备
         init_body = {"device_name": args.name, "uuid": fp, "os": SYSTEM}
-        if reuse_device:
-            init_body["device_id"] = reuse_device
+        fixed = want_id or reuse_device
+        if fixed:
+            init_body["device_id"] = fixed
         init = (await hc.post(f"/api/v1/device/{plat}/init",
                               json=init_body, headers=h)).json()
         assert init["code"] == 0, init
@@ -319,7 +383,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                               json={"device_id": device_id, "mode": "control"}, headers=h)).json()
         assert room["code"] == 0, room
         cfg = room["data"]
-        print(f"[agent] device={device_id} room={cfg['room_id']}", flush=True)
+        print(f"[agent] device={device_id}（{id_src}） room={cfg['room_id']}", flush=True)
         print(f"[agent] 手机打开 {args.server}/control 登录同一手机号即可控制", flush=True)
 
     inject, (sw, sh), release_all = _init_input()
@@ -648,6 +712,10 @@ def main() -> int:
     ap.add_argument("--no-audio", action="store_true", help="关闭音频采集（默认开）")
     ap.add_argument("--audio-device", default=None,
                     help="音频输入设备名/序号（系统内录需指向 BlackHole 等虚拟声卡）")
+    ap.add_argument("--device-id", default=None,
+                    help="显式指定设备 id（默认复用 ~/.uu-agent/device_id）")
+    ap.add_argument("--new-device", action="store_true",
+                    help="强制注册一台新设备（会重写 ~/.uu-agent/device_id）")
     ap.add_argument("--insecure", action="store_true", help="跳过证书校验（自签调试）")
     args = ap.parse_args()
     if not args.mobile and not args.token:
