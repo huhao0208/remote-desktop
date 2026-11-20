@@ -51,6 +51,23 @@ python ../tools/e2e_proxy_test.py      # ALL PASS（真实 TLS 链路，证书/�
 TURN 短时效凭据（HMAC-SHA1，与 coturn `use-auth-secret` 一致）、
 未实现接口兜底并抓包。
 
+## 客户端策略（2026-11-20 定稿）
+
+**控制端只有两套，Electron / Capacitor 已废弃。**
+
+| 端 | 形态 | 状态 |
+|---|---|---|
+| 桌面（Win/macOS/Linux） | **Flutter**（`client-flutter/`） | ✅ 唯一桌面客户端 |
+| 移动（Android/iOS） | **Flutter**（同一工程） | ✅ 唯一移动客户端 |
+| 任意浏览器 | H5 控制页 `srv2/control.html` | ✅ 免安装入口，长期保留 |
+| ~~Electron（`client-desktop/`）~~ | 已废弃 | ⛔ 不再构建/发布，仅留档 |
+| ~~Capacitor（`client-mobile/`）~~ | 已废弃 | ⛔ 同上 |
+
+废弃理由（实测）：Electron 包 144MB（解包 274MB）、冷启 1–3s；Flutter 包 53MB（解包 128MB）、冷启 0.67s，
+且 Flutter 用 `Texture` 零拷贝通路更适合后续硬解。详见 `docs/客户端框架重选型-Flutter.md`。
+
+> 被控端仍是 `agent/agent.py`（Flutter 桌面版启动时以 `--token` 拉起随包分发的 `uu-agent`，与旧 Electron 行为一致）。
+
 ## 手机远程控制电脑（自研轻量链路）
 
 ```

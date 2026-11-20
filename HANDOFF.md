@@ -846,3 +846,23 @@ cd srv2 && bash run.sh start       # 起服务端 + mitmproxy(8080)
 ---
 
 *本文档与 `docs/reverse/` 逆向分析资料、`docs/media-protocol.md`（媒体契约）、`docs/媒体链路实测.md`、`docs/客户端全端技术选型.md` 配合使用。逆向资料仅用于理解互操作契约与功能设计，不包含绕过授权校验的方法。*
+### ADR-9 废弃 Electron / Capacitor，控制端统一 Flutter
+
+**状态**：Accepted（2026-11-20）
+
+**Context**：ADR-7 已决定迁移 Flutter，但迁移期间保留 Electron 作为可用版本。实测两版差距：
+Electron 包 144MB / 解包 274MB / 冷启 1–3s；Flutter 包 53MB / 解包 128MB / 冷启 666ms。
+两套并行维护成本高，且 Electron 版已不再承担独有能力（内置 agent 将由 Flutter 桌面版接管）。
+
+**Decision**：Electron（`client-desktop/`）与 Capacitor（`client-mobile/`）**停止构建与发布**，
+目录仅留档；控制端收敛为 Flutter 一套 + H5 控制页（`srv2/control.html`）作为免安装入口。
+CI 中 `desktop-client`、`android-apk`、`ios-project` 三个 job 保留定义但不进 `release.needs`。
+
+**Consequences**：
+- 好：单一代码库、发布产物减少 6 个、体积降 2.1×、启动快 2–4×；UI 改动只需改一处
+- 代价：Flutter 桌面版必须自己接管「内置被控端」（Process 拉起 uu-agent），否则「装上即可被控」的能力会丢失；
+  这是 Electron `main.js` 原本负责的部分，迁移未完成前不能删 `client-desktop/` 目录
+- 已知缺口：Flutter 侧 WebRTC 通路（`flutter_webrtc`）落地前，Flutter 客户端只有 JPEG 画质
+
+**复核条件**：若 Flutter 桌面版 CPU 在 1080p60 下超 40%，或 `flutter_webrtc` 在某一端不可用，
+再单独评估该端是否回退（不整体回退到 Electron）。
