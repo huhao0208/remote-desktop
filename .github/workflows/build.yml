@@ -209,7 +209,10 @@ jobs:
         run: |
           mkdir -p pack-termux
           cp srv2/server.py srv2/control.html srv2/tests.py srv2/tests_regression.py pack-termux/
-          cp agent/agent.py agent/webrtc_media.py pack-termux/
+          # 整个 agent 包都要带上：agent.py 顶层就 import
+          # _version / clipboard_sync / screens，只拷两个文件会直接 ModuleNotFoundError
+          # （v0.1.2/v0.1.3 的 Termux 包其实已经启动不了，这里一并修掉）
+          cp agent/*.py pack-termux/
           cp packaging/run-termux.sh pack-termux/run.sh
           cp srv2/README.md pack-termux/
           chmod +x pack-termux/run.sh
