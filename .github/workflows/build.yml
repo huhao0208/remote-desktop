@@ -354,7 +354,8 @@ jobs:
   # 用户下载后既不是 zip 也解不出 .app。ditto 是 macOS 原生打包工具，
   # --keepParent 保证解压后是 uu_remote.app/ 完整包结构（保 xattr/资源分叉）。
   flutter-build-macos:
-    needs: flutter-verify
+    # binary 提供同平台的 uu-agent，塞进 .app 里当「随包被控端」（见 agent_host.dart）
+    needs: [flutter-verify, binary]
     runs-on: macos-latest
     defaults:
       run:
@@ -368,7 +369,40 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build macos --release
+      # 客户端会拉起随包分发的被控端（lib/core/agent_host.dart 按
+      # Contents/Resources/agent/uu-agent 查找），二进制由 binary job 用 PyInstaller 产出，
+      # 这里从同平台的服务端/Agent 包里取出来塞进 .app。
+      - uses: actions/download-artifact@v4
+        with:
+          name: uu-remote-macos-arm64
+          path: ${{ github.workspace }}/agent-pkg
+      - name: Bundle uu-agent into .app
+        run: |
+          set -euo pipefail
+          APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | sed -n '1p')"
+          mkdir -p "$GITHUB_WORKSPACE/agent-pkg/extract"
+          tar -xzf "$GITHUB_WORKSPACE/agent-pkg/uu-remote-macos-arm64.tar.gz" \
+            -C "$GITHUB_WORKSPACE/agent-pkg/extract" ./client/uu-agent
+          mkdir -p "$APP_PATH/Contents/Resources/agent"
+          install -m 0755 "$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent" \
+            "$APP_PATH/Contents/Resources/agent/uu-agent"
+          ls -l "$APP_PATH/Contents/Resources/agent/uu-agent"
+      - name: Ad-hoc sign .app
+        # 必须先签里层的 uu-agent，再用 --deep 签整个 .app，否则 Gatekeeper 会拦子进程。
+        # 没签名时 Release.entitlements 的 app-sandbox=true 会让沙箱初始化直接
+        # SIGTRAP 崩溃（_libsecinit_appsandbox）。ad-hoc 签名不是 Developer ID，
+        # 只能自用，不能分发给别人的 Mac。
+        run: |
+          set -euo pipefail
+          APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | sed -n '1p')"
+          codesign --force --sign - "$APP_PATH/Contents/Resources/agent/uu-agent"
+          codesign --force --deep --sign - "$APP_PATH"
+          # 校验：签名信息里应出现 adhoc；顺手 verify 整个包
+          codesign -dv "$APP_PATH" 2>&1 | sed -n '1,8p'
+          codesign -dv "$APP_PATH" 2>&1 | grep -q "adhoc" || { echo "未拿到 ad-hoc 签名"; exit 1; }
+          codesign --verify --deep --strict "$APP_PATH" && echo "codesign verify ok"
       - name: Package .app into zip
+        # 顺序不能反：先签名再 ditto，签在 zip 里不会生效。
         run: |
           set -euo pipefail
           APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | sed -n '1p')"
@@ -379,6 +413,10 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
           # 用 sed 不用 head：head 读够就关管道 → 上游 SIGPIPE，配 pipefail 会误判失败
           unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" | sed -n '1,6p'
+          # 断言 agent 真的进了包，别只信构建目录
+          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" \
+            | grep -q "uu_remote.app/Contents/Resources/agent/uu-agent" \
+            || { echo "zip 里没有随包 uu-agent"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-macos
@@ -387,7 +425,7 @@ jobs:
 
   # Linux 桌面 App：runner 需先装 GTK/CMake 工具链
   flutter-build-linux:
-    needs: flutter-verify
+    needs: [flutter-verify, binary]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -403,6 +441,21 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build linux --release
+      # 同 macOS：把被控端塞进 bundle/data/flutter_assets/agent/uu-agent
+      - uses: actions/download-artifact@v4
+        with:
+          name: uu-remote-linux-x64
+          path: ${{ github.workspace }}/agent-pkg
+      - name: Bundle uu-agent into bundle
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/agent-pkg/extract"
+          tar -xzf "$GITHUB_WORKSPACE/agent-pkg/uu-remote-linux-x64.tar.gz" \
+            -C "$GITHUB_WORKSPACE/agent-pkg/extract" ./client/uu-agent
+          mkdir -p build/linux/x64/release/bundle/data/flutter_assets/agent
+          install -m 0755 "$GITHUB_WORKSPACE/agent-pkg/extract/client/uu-agent" \
+            build/linux/x64/release/bundle/data/flutter_assets/agent/uu-agent
+          ls -l build/linux/x64/release/bundle/data/flutter_assets/agent/uu-agent
       - name: Package bundle into tarball
         # 同 macOS：bundle 是目录，直接上传会与 merge-multiple 打架，
         # v0.1.0 的 Release 里 Linux 桌面包因此整个丢失（既没有 tar 也没有目录条目）。
@@ -414,6 +467,10 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz"
           # 同上：不能 head，SIGPIPE 会让 tar 返回错误码
           tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" | sed -n '1,5p'
+          # 断言随包被控端在 tar 里
+          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" \
+            | grep -q "bundle/data/flutter_assets/agent/uu-agent" \
+            || { echo "tar 里没有随包 uu-agent"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-linux
@@ -423,7 +480,7 @@ jobs:
   # Windows 桌面 App：windows-latest 自带 VS 2022（含「使用 C++ 的桌面开发」工作负载），
   # 正常不需要额外装 MSVC；万一镜像变更导致 flutter build 报缺工具链，再补 setup-msbuild。
   flutter-build-windows:
-    needs: flutter-verify
+    needs: [flutter-verify, binary]
     runs-on: windows-latest
     defaults:
       run:
@@ -438,6 +495,24 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build windows --release
+      # 同 macOS/Linux：客户端会拉起随包被控端，放到 exe 同目录的 agent\uu-agent.exe
+      - uses: actions/download-artifact@v4
+        with:
+          name: uu-remote-windows-x64
+          path: ${{ github.workspace }}/agent-pkg
+      - name: Bundle uu-agent into build output
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = Join-Path $env:GITHUB_WORKSPACE 'agent-pkg'
+          $zipIn = Join-Path $pkg 'uu-remote-windows-x64.zip'
+          if (-not (Test-Path $zipIn)) { throw "没拿到 Agent 包：$zipIn" }
+          Expand-Archive -Path $zipIn -DestinationPath (Join-Path $pkg 'extract') -Force
+          $agent = Join-Path $pkg 'extract\client\uu-agent.exe'
+          if (-not (Test-Path $agent)) { throw "Agent 包里没有 client\uu-agent.exe" }
+          $destDir = 'build/windows/x64/runner/Release/agent'
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Copy-Item -Path $agent -Destination (Join-Path $destDir 'uu-agent.exe') -Force
+          Get-Item (Join-Path $destDir 'uu-agent.exe') | Select-Object Name, Length | Format-List | Out-String | Write-Host
       - name: Package build into zip
         # 同 macOS/Linux：Release 目录不能直接上传（merge-multiple 会拆散），先打一个 zip。
         # 解压即得 uu_remote.exe 与 flutter_windows.dll / data/ 同级，直接双击运行。
@@ -455,7 +530,9 @@ jobs:
           $archive.Entries | Select-Object -First 6 FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
           $archive.Dispose()
           if ($names -notcontains 'uu_remote.exe') { throw 'zip 根目录没有 uu_remote.exe，打包结构不对' }
-          Write-Host "entries: $($names.Count)，uu_remote.exe 已确认在根目录"
+          # Compress-Archive 在不同 PowerShell 版本里可能写 \ 或 /，两种都认
+          if (-not ($names -match '^agent[\\/]uu-agent\.exe$')) { throw 'zip 里没有随包 agent\uu-agent.exe' }
+          Write-Host "entries: $($names.Count)，uu_remote.exe 与 agent\uu-agent.exe 均已确认"
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-windows

@@ -101,15 +101,30 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 ## 7. Flutter 控制端（client-flutter，4 个构建 job）
 
 `flutter-verify` 是门禁，四个 `flutter-build-*` 都 `needs: flutter-verify`，只有 analyze/test
-通过才会跑；`release` job 的 `needs` 也已包含这四个 job，tag 发布时产物一并上传。
+通过才会跑；三个桌面 job 还额外 `needs: binary`（要从服务端/Agent 包里取 `uu-agent` 塞进
+客户端，见下「随包被控端」）。`release` job 的 `needs` 已包含这四个 job，tag 发布时产物一并上传。
 
 | job | runner | 关键依赖 | 产物（artifact 名 / 大小） |
 |---|---|---|---|
 | `flutter-verify` | ubuntu-latest | `subosito/flutter-action@v2`，钉 `stable / 3.50.1`（Dart 3.14，pubspec 要求 sdk ≥3.13） | 无（只跑 `flutter pub get` / `analyze --fatal-infos` / `test`） |
-| `flutter-build-macos` | macos-latest (arm64) | runner 自带 Xcode + CocoaPods；工程无第三方原生插件，`macos/Runner/Release.entitlements` 已开 `com.apple.security.network.client`（沙箱内联网必需） | `uu-remote-client-flutter-macos` / `uu-remote-client-flutter-macos.zip`（`ditto` 归档 .app），v0.1.1 实测 18 MB（解包 53 MB） |
-| `flutter-build-linux` | ubuntu-latest | `apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev`（Flutter Linux 桌面必需，缺 GTK 会直接 cmake 失败） | `uu-remote-client-flutter-linux` / `uu-remote-client-flutter-linux.tar.gz`（tar 保住可执行位），v0.1.1 实测 10 MB |
-| `flutter-build-windows` | windows-latest | 镜像自带 VS 2022「使用 C++ 的桌面开发」，无需额外装 MSVC；`shell: pwsh` | `uu-remote-client-flutter-windows` / `uu-remote-client-flutter-windows.zip`（`Compress-Archive` 打 `runner/Release/*`），脚本会断言根目录有 `uu_remote.exe` |
-| `flutter-build-android` | ubuntu-latest | `actions/setup-java@v4` temurin **JDK 17** + runner 自带 Android SDK（无需 setup-android） | `uu-remote-client-flutter-android` / `uu-remote-client-flutter-android.apk`，v0.1.1 实测 51 MB |
+| `flutter-build-macos` | macos-latest (arm64) | runner 自带 Xcode + CocoaPods；`macos/Runner/Release.entitlements` 已开 `com.apple.security.network.client`（沙箱内联网必需） | `uu-remote-client-flutter-macos` / `uu-remote-client-flutter-macos.zip`：塞入 agent → **ad-hoc 签名**（先签 agent 再 `--deep` 签 App）→ `ditto` 归档，脚本断言 zip 内有 `Contents/Resources/agent/uu-agent` |
+| `flutter-build-linux` | ubuntu-latest | `apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev`（Flutter Linux 桌面必需，缺 GTK 会直接 cmake 失败） | `uu-remote-client-flutter-linux` / `uu-remote-client-flutter-linux.tar.gz`（tar 保住可执行位），agent 放 `bundle/data/flutter_assets/agent/uu-agent`，tar 内断言其存在 |
+| `flutter-build-windows` | windows-latest | 镜像自带 VS 2022「使用 C++ 的桌面开发」，无需额外装 MSVC；`shell: pwsh` | `uu-remote-client-flutter-windows` / `uu-remote-client-flutter-windows.zip`（`Compress-Archive` 打 `runner/Release/*`），agent 放 `agent\uu-agent.exe`，脚本断言根目录 `uu_remote.exe` 与 agent 都在 |
+| `flutter-build-android` | ubuntu-latest | `actions/setup-java@v4` temurin **JDK 17** + runner 自带 Android SDK（无需 setup-android） | `uu-remote-client-flutter-android` / `uu-remote-client-flutter-android.apk`，v0.1.1 实测 51 MB（纯控制端，不带 agent） |
+
+**随包被控端（uu-agent）**：客户端登录后会拉起随包分发的被控端进程
+（`client-flutter/lib/core/agent_host.dart`），找不到就提示「被控端未随包分发」。CI 的做法是
+`flutter build *` 之后从同平台的 `uu-remote-<platform>` 包里取出 `client/uu-agent[.exe]`，复制到
+以下位置（顺序必须在打包/签名之前）：
+
+| 平台 | 目标路径 |
+|---|---|
+| macOS | `uu_remote.app/Contents/Resources/agent/uu-agent`（0755，且必须先签名再签整个 App） |
+| Windows | `agent\uu-agent.exe`（与 `uu_remote.exe` 同级的子目录，代码也兼容同级直接放） |
+| Linux | `bundle/data/flutter_assets/agent/uu-agent`（0755） |
+
+不要试图在 `flutter build bundle` 阶段塞：那一步只编 Dart，产物会被后续原生构建覆盖。
+三个桌面 job 因此 `needs: [flutter-verify, binary]`（`binary` 才产出 agent 二进制）。
 
 已知限制：
 
@@ -118,7 +133,9 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
    现已改为根锚定的 `/lib/`，**新增 Flutter 目录时注意别再写裸路径规则**。
 2. Android 产物用 **debug key 签名**（`flutter build apk --release` 未配 `key.properties`），
    可安装可运行，**不能上架**；正式发布需补 keystore 与 `signingConfigs`。
-3. macOS 产物未签名/未公证，用户首次打开需右键「打开」或在系统设置里放行；
+3. macOS 产物是 **ad-hoc 签名**（不是 Developer ID，也没公证）：不签会因
+   `app-sandbox=true` 在沙箱初始化时 SIGTRAP 崩溃，所以 CI 必须签；用户首次打开仍需
+   `xattr -dr com.apple.quarantine` 或右键「打开」，且只能自用、不能分发给别人的 Mac（详 §9.4 第 1 条）。
    覆盖分发需 Developer ID 证书 + `notarytool`。
 4. Linux 产物依赖 runner 的 glibc（ubuntu-latest，2.39+），老发行版需自行降级构建环境。
 
@@ -163,15 +180,19 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 ### 9.2 控制端（Flutter，唯一发布的客户端）
 
 官方浅色风界面，桌面/移动同一套代码、装上即用（内置默认服务器地址）。
-macOS 包 v0.1.1 实测 **18 MB zip / 解包 53 MB**（53 MB 是 `.app` 解包体积，不是 zip 大小），
-冷启约 0.7 s；Windows / Linux / 安卓包体积见 v0.1.2 Release 页。
+**三个桌面包都自带被控端 `uu-agent`**（PyInstaller 单文件，约 50 MB 级），所以「允许其他设备
+控制本机」开箱可用；代价是包体比分 v0.1.1 明显变大，具体数字看 v0.1.2 Release 页。
+macOS 包 v0.1.1 时是 18 MB zip / 解包 53 MB（53 MB 是 `.app` 解包体积，不是 zip 大小）；
+v0.1.2 加上 agent 后 zip 会到几十 MB 量级。
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-client-flutter-macos.zip` | 18 MB（解包 53 MB） | Apple Silicon macOS；解压得 `uu_remote.app`（未签名，右键「打开」） |
-| `uu-remote-client-flutter-windows.zip` | 待 v0.1.2 实测 | Windows 10/11 x64；解压后双击 `uu_remote.exe`（未签名，SmartScreen 需「仍要运行」） |
-| `uu-remote-client-flutter-linux.tar.gz` | 10 MB | Linux 桌面；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
-| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓手机（debug key 签名，可装不可上架） |
+| `uu-remote-client-flutter-macos.zip` | v0.1.1 为 18 MB（解包 53 MB），v0.1.2 含 agent 后变大 | Apple Silicon macOS；解压得 `uu_remote.app`，**已做 ad-hoc 签名**（首次仍要过 Gatekeeper，见 §9.4 第 1 条） |
+| `uu-remote-client-flutter-windows.zip` | v0.1.2 实测 | Windows 10/11 x64；解压后双击 `uu_remote.exe`，被控端在同目录 `agent\uu-agent.exe`（未签名，SmartScreen 需「仍要运行」） |
+| `uu-remote-client-flutter-linux.tar.gz` | v0.1.2 实测 | Linux 桌面；解压得 `bundle/`，跑 `bundle/uu_remote`，被控端在 `bundle/data/flutter_assets/agent/uu-agent` |
+| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓手机（debug key 签名，可装不可上架；纯控制端，不带 agent） |
+
+被控端首次运行需要在系统里授权：macOS 给「屏幕录制 + 辅助功能」，Windows/Linux 视系统而定。
 
 **iOS 没有发布产物**：CI 不产出 ipa（`flutter build ios --no-codesign` 出来的未签名 `.app`
 对用户装不上，没意义）。需要 iOS 客户端请自行用 Xcode 打开 `client-flutter/ios` 构建，
@@ -201,9 +222,14 @@ v0.1.0 的 macOS/Linux Flutter 包是坏的（macOS 变成 23 KB 的 `uu_remote`
 
 ### 9.4 已知限制（下载前先看）
 
-1. **全部 macOS 产物未签名 / 未公证**：首次打开会被 Gatekeeper 拦。右键 →「打开」，
-   或 `xattr -dr com.apple.quarantine /Applications/uu_remote.app`。正式分发需
-   Developer ID 证书 + `notarytool`。
+1. **macOS 产物是 ad-hoc 签名，不是 Developer ID**：CI 里先签 `Contents/Resources/agent/uu-agent`
+   再用 `codesign --force --deep --sign -` 签整个 `.app`。不签名时 `Release.entitlements` 的
+   `app-sandbox=true` 会让沙箱初始化直接 SIGTRAP 崩溃，所以这一步是必需的。
+   用户须知：
+   - 首次运行仍会被 Gatekeeper 拦（从未公证），执行
+     `xattr -dr com.apple.quarantine /Applications/uu_remote.app`，或右键 →「打开」放行。
+   - ad-hoc 签名**不能分发给他人的 Mac**（对方 Gatekeeper 会拦，且系统不认为是同一开发者）；
+     正式对外分发需 Developer ID 证书 + `notarytool` 公证。自用可跑。
 2. **Windows 产物未签名**：`uu_remote.exe` 首次运行会被 SmartScreen 拦，点「更多信息 →
    仍要运行」；正式分发需代码签名证书（EV/OV）。Windows 包是免安装的目录形态，
    整个 zip 解压后直接跑，**没有安装程序**。
