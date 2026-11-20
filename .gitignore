@@ -67,3 +67,7 @@ data-local/
 
 # QA 运行产物（每次跑都会变，不入库）
 tools/qa/.artifacts/
+
+# 服务端升级脚本记录的回滚点（本机状态，不入库）
+deploy/nas/.last-upgrade-tag
+deploy/nas/upgrade.log

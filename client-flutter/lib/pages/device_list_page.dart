@@ -9,7 +9,10 @@ import '../core/api_client.dart';
 import '../core/models.dart';
 import '../core/settings.dart';
 import '../core/theme.dart';
+import '../core/updater.dart';
+import '../core/version.g.dart';
 import '../widgets/ui_kit.dart';
+import '../widgets/update_dialog.dart';
 import 'login_page.dart';
 import 'remote_page.dart';
 
@@ -40,11 +43,35 @@ class _DeviceListPageState extends State<DeviceListPage> {
 
   Timer? _poll;
 
+  /// 上一次后台检查到的更新结果（null = 还没检查过）。
+  UpdateCheckResult? _update;
+
   @override
   void initState() {
     super.initState();
     _load();
     _poll = Timer.periodic(const Duration(seconds: 15), (_) => _load(silent: true));
+    unawaited(_silentUpdateCheck());
+  }
+
+  /// 启动后延迟 3s 静默查一次更新：24h 节流，命中缓存不发请求。
+  ///
+  /// 只查不下载——远程桌面客户端在用户远控时被静默替换会直接断链，
+  /// 升级动作必须由用户在「我的 → 检查更新」里点。
+  Future<void> _silentUpdateCheck() async {
+    if (!Settings.updateAutoCheck) return;
+    await Future<void>.delayed(const Duration(seconds: 3));
+    final UpdateCheckResult r = await Updater.check();
+    if (!mounted) return;
+    setState(() => _update = r);
+  }
+
+  Future<void> _openUpdateDialog() async {
+    await showUpdateDialog(context, initial: _update);
+    if (!mounted) return;
+    // 关掉对话框后刷新角标（用户可能刚点了「跳过此版本」）
+    final UpdateCheckResult r = await Updater.check();
+    if (mounted) setState(() => _update = r);
   }
 
   @override
@@ -113,12 +140,13 @@ class _DeviceListPageState extends State<DeviceListPage> {
           children: <Widget>[
             _devicesTab(),
             _AssistTab(onDone: () => setState(() => _tab = 0)),
-            _ProfileTab(onLoggedOut: _logout),
+            _ProfileTab(onLoggedOut: _logout, update: _update, onCheckUpdate: _openUpdateDialog),
           ],
         ),
       ),
       bottomNavigationBar: _BottomBar(
         index: _tab,
+        hasUpdate: _update?.hasUpdate ?? false,
         onTap: (int i) => setState(() => _tab = i),
       ),
     );
@@ -547,9 +575,11 @@ class _AssistTabState extends State<_AssistTab> {
 
 /// 我的：账号信息、服务器地址（可改）、本机设备 ID、退出登录。全部读真实本地状态。
 class _ProfileTab extends StatefulWidget {
-  const _ProfileTab({required this.onLoggedOut});
+  const _ProfileTab({required this.onLoggedOut, this.update, this.onCheckUpdate});
 
   final Future<void> Function() onLoggedOut;
+  final UpdateCheckResult? update;
+  final Future<void> Function()? onCheckUpdate;
 
   @override
   State<_ProfileTab> createState() => _ProfileTabState();
@@ -640,6 +670,15 @@ class _ProfileTabState extends State<_ProfileTab> {
                           Clipboard.setData(ClipboardData(text: Settings.deviceId));
                           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('设备 ID 已复制')));
                         },
+                      ),
+                      const Divider(height: 1),
+                      _row(
+                        context,
+                        icon: Icons.system_update_alt,
+                        label: '检查更新',
+                        value: _updateValue(),
+                        highlight: widget.update?.hasUpdate ?? false,
+                        onTap: widget.onCheckUpdate == null ? null : () => widget.onCheckUpdate!(),
                       ),
                     ],
                   ),
@@ -757,7 +796,7 @@ class _ProfileTabState extends State<_ProfileTab> {
     }
   }
 
-  Widget _row(BuildContext context, {required IconData icon, required String label, required String value, VoidCallback? onTap}) {
+  Widget _row(BuildContext context, {required IconData icon, required String label, required String value, VoidCallback? onTap, bool highlight = false}) {
     return InkWell(
       onTap: onTap,
       child: Padding(
@@ -768,13 +807,25 @@ class _ProfileTabState extends State<_ProfileTab> {
             const SizedBox(width: AppSpace.md),
             Text(label, style: const TextStyle(fontSize: 14, color: AppColors.text)),
             const Spacer(),
+            if (highlight) ...<Widget>[
+              Container(
+                width: 6,
+                height: 6,
+                decoration: const BoxDecoration(color: AppColors.danger, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 6),
+            ],
             Flexible(
               child: Text(
                 value,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.right,
-                style: const TextStyle(fontSize: 13, color: AppColors.muted),
+                style: TextStyle(
+                  fontSize: 13,
+                  color: highlight ? AppColors.accent : AppColors.muted,
+                  fontWeight: highlight ? FontWeight.w600 : FontWeight.w400,
+                ),
               ),
             ),
             const SizedBox(width: 6),
@@ -783,6 +834,16 @@ class _ProfileTabState extends State<_ProfileTab> {
         ),
       ),
     );
+  }
+
+  /// 「检查更新」右侧文案：把版本号和最新检查结果合成一行。
+  String _updateValue() {
+    final UpdateCheckResult? u = widget.update;
+    if (u == null) return 'v$kAppVersion';
+    if (u.hasUpdate) return 'v${u.info?.version ?? ''} 可升级';
+    if (u.status == UpdateStatus.skipped) return 'v$kAppVersion · 已跳过新版';
+    if (u.status == UpdateStatus.failed) return 'v$kAppVersion · 检查失败';
+    return 'v$kAppVersion · 已是最新';
   }
 
   Future<void> _editServer(BuildContext context) async {
@@ -818,10 +879,13 @@ class _ProfileTabState extends State<_ProfileTab> {
 
 /// 底部三 Tab：白底 + 细分割线，选中蓝、未选中灰，只变颜色不加背景块。
 class _BottomBar extends StatelessWidget {
-  const _BottomBar({required this.index, required this.onTap});
+  const _BottomBar({required this.index, required this.onTap, this.hasUpdate = false});
 
   final int index;
   final ValueChanged<int> onTap;
+
+  /// 「我的」上挂个红点：有新版本但用户还没去看。
+  final bool hasUpdate;
 
   static const List<(IconData, IconData, String)> _items = <(IconData, IconData, String)>[
     (Icons.devices_outlined, Icons.devices, '我的设备'),
@@ -850,7 +914,26 @@ class _BottomBar extends StatelessWidget {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: <Widget>[
-                      Icon(on ? _items[i].$2 : _items[i].$1, size: 22, color: color),
+                      Stack(
+                        clipBehavior: Clip.none,
+                        children: <Widget>[
+                          Icon(on ? _items[i].$2 : _items[i].$1, size: 22, color: color),
+                          if (hasUpdate && i == 2)
+                            Positioned(
+                              right: -2,
+                              top: -1,
+                              child: Container(
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  color: AppColors.danger,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: const Color(0xFFFCFDFE), width: 1),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                       const SizedBox(height: 3),
                       Text(
                         _items[i].$3,

@@ -87,6 +87,14 @@ jobs:
       - name: Install deps
         # aiortc/av/numpy 供 agent 的 WebRTC 媒体通道打包用（agent/webrtc_media.py）
         run: pip install fastapi "uvicorn[standard]" pyinstaller mss pillow pyautogui httpx websockets aiortc av numpy
+      - name: 注入版本号
+        shell: bash
+        # 写 agent/_version.py 与 srv2/_version.py；两个二进制都会带上版本，
+        # `/healthz` 和 `uu-agent --version` 才有得报（自更新靠它判断新旧）
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --build ${{ github.run_number }}
       - name: Build standalone binaries (server + agent)
         shell: bash
         run: |
@@ -118,6 +126,7 @@ jobs:
             --collect-submodules aiortc \
             --collect-all av \
             --hidden-import webrtc_media \
+            --hidden-import updater \
             --hidden-import pyautogui --hidden-import PIL \
             --exclude-module tkinter --exclude-module _tkinter \
             --exclude-module mouseinfo --exclude-module pymsgbox \
@@ -174,6 +183,21 @@ jobs:
         with:
           name: uu-remote-${{ matrix.name }}
           path: uu-remote-${{ matrix.name }}.*
+          retention-days: 30
+      # 被控端自更新专用包：只有 agent（约 47 MB），不用为升级下载 100+MB 的服务端包。
+      # 归档根目录就是 onedir 的内容（uu-agent 或 uu-agent.exe 与 _internal/ 同级），
+      # agent/updater.py 解压后直接覆盖安装目录。
+      - name: Archive agent only (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path 'dist/uu-agent/*' -DestinationPath "uu-agent-${{ matrix.name }}.zip"
+      - name: Archive agent only (tar)
+        if: matrix.archive == 'tar'
+        run: tar -czf "uu-agent-${{ matrix.name }}.tar.gz" -C dist/uu-agent .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-agent-${{ matrix.name }}
+          path: uu-agent-${{ matrix.name }}.*
           retention-days: 30
 
   # ------------------------------------------------ 移动端 / 通用源码包
@@ -306,6 +330,14 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
+      # 版本号单一真源在仓库根的 VERSION，这里只校验生成物没漂移。
+      # 漂移会让「检查更新」判断错版本（v0.1.3 时 pubspec 还停在 0.1.0+1）。
+      - name: 版本一致性
+        working-directory: .
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --check
       - run: flutter analyze --fatal-infos
       - run: flutter test
 
@@ -330,6 +362,13 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
+      - name: 注入版本号
+        working-directory: .
+        # build 号用 CI 的 run_number，保证同版本重复构建也能区分（pubspec 的 +N）
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --build ${{ github.run_number }}
       - run: flutter build macos --release
       # 客户端会拉起随包分发的被控端（lib/core/agent_host.dart 按
       # Contents/Resources/agent/uu-agent 查找），二进制由 binary job 用 PyInstaller 产出，
@@ -422,6 +461,12 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
+      - name: 注入版本号
+        working-directory: .
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --build ${{ github.run_number }}
       - run: flutter build linux --release
       # 同 macOS：把被控端整个目录摊平进 bundle/data/flutter_assets/agent/
       - uses: actions/download-artifact@v4
@@ -481,6 +526,13 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
+      - name: 注入版本号
+        shell: bash
+        working-directory: .
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --build ${{ github.run_number }}
       - run: flutter build windows --release
       # 同 macOS/Linux：客户端会拉起随包被控端，放到 exe 同目录的 agent\uu-agent.exe
       - uses: actions/download-artifact@v4
@@ -552,6 +604,37 @@ jobs:
           flutter-version: 3.50.1
           cache: true
       - run: flutter pub get
+      - name: 注入版本号
+        working-directory: .
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python) || { echo "找不到 python"; exit 1; }
+          "$PY" scripts/gen_version.py --build ${{ github.run_number }}
+      # 固定 release 签名是「应用内升级」的前提：覆盖安装要求新旧包签名一致。
+      # 没配 secrets 就回退 debug 签名（与以前行为一致），但会打一条警告——
+      # debug 签名的包一旦换了构建机就升不上去（只会提示「应用未安装」）。
+      - name: 还原 release 签名（可选）
+        shell: bash
+        working-directory: client-flutter/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::warning::未配置 ANDROID_KEYSTORE_B64，APK 将用 debug 签名，应用内升级会因签名不一致失败"
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > app/uu-release.jks
+          {
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyPassword=$KEY_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storeFile=uu-release.jks"
+          } > key.properties
+          echo "已还原 release keystore（alias=$KEY_ALIAS）"
       # 按 ABI 拆分：flutter_webrtc 会把各 ABI 的 libwebrtc.so 全塞进一个包，
       # 全 ABI 包 v0.1.2 实测 88 MB；拆开后每个约 45 MB。
       # 只发 arm64-v8a（近五年手机）与 armeabi-v7a（老机器/电视盒子），
@@ -588,6 +671,20 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      # 校验和清单：GitHub 自己会给每个资产返回 digest，但老版本/镜像站点不一定有，
+      # 客户端 updater.dart 与 agent/updater.py 都会在 digest 缺失时回退到这份清单。
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd artifacts
+          : > SHA256SUMS
+          for f in *; do
+            [ "$f" = "SHA256SUMS" ] && continue
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS
+          done
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:

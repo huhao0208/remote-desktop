@@ -21,6 +21,13 @@ class Settings {
   static const String _kQuality = 'quality_preset';
   static const String _kAllowBeControlled = 'allow_be_controlled';
 
+  // ---- 自动升级（v0.2.0 起）----
+  static const String _kUpdateCheckMs = 'update_last_check_ms';
+  static const String _kUpdateEtag = 'update_etag';
+  static const String _kUpdateCache = 'update_cache_json';
+  static const String _kUpdateSkip = 'update_skip_version';
+  static const String _kUpdateAuto = 'update_auto_check';
+
   static late SharedPreferences _prefs;
 
   static Future<void> init() async {
@@ -92,6 +99,36 @@ class Settings {
       _prefs.setBool(_kAllowBeControlled, value);
 
   static bool get hasSession => token.isNotEmpty && deviceId.isNotEmpty;
+
+  // ---- 自动升级状态 ----------------------------------------------------
+  // 只存「上次检查时间 / ETag / 上次结果 JSON / 跳过的版本」，不存包体。
+  // 包体落在 ~/.uu-remote/updates/（Windows 是 %LOCALAPPDATA%），见 updater.dart。
+
+  /// 上次真正打到 GitHub 的时间（毫秒），用于 24h 节流。
+  static int get updateLastCheckMs => _prefs.getInt(_kUpdateCheckMs) ?? 0;
+  static Future<void> setUpdateLastCheckMs(int value) => _prefs.setInt(_kUpdateCheckMs, value);
+
+  /// GitHub 的 ETag：命中 304 时不消耗匿名 60 次/小时的限额。
+  static String get updateEtag => _prefs.getString(_kUpdateEtag) ?? '';
+  static Future<void> setUpdateEtag(String value) => _prefs.setString(_kUpdateEtag, value);
+
+  /// 上一次的 release JSON（原样缓存），离线/限流时仍能在「检查更新」里展示。
+  static String get updateCacheJson => _prefs.getString(_kUpdateCache) ?? '';
+  static Future<void> setUpdateCacheJson(String value) => _prefs.setString(_kUpdateCache, value);
+
+  /// 用户点了「跳过此版本」的版本号。
+  static String get updateSkipVersion => _prefs.getString(_kUpdateSkip) ?? '';
+  static Future<void> setUpdateSkipVersion(String value) async {
+    if (value.isEmpty) {
+      await _prefs.remove(_kUpdateSkip);
+    } else {
+      await _prefs.setString(_kUpdateSkip, value);
+    }
+  }
+
+  /// 启动时是否静默检查更新（默认开）。只检查、不下载。
+  static bool get updateAutoCheck => _prefs.getBool(_kUpdateAuto) ?? true;
+  static Future<void> setUpdateAutoCheck(bool value) => _prefs.setBool(_kUpdateAuto, value);
 
   static String _newUuid() {
     final r = Random.secure();

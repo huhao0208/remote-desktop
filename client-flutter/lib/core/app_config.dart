@@ -13,6 +13,15 @@ class AppConfig {
   static const String defaultServer =
       _envServer == '' ? 'https://47-251-105-202.sslip.io:8444' : _envServer;
 
+  /// 自动升级查询的 GitHub 仓库（`owner/repo`）。
+  ///
+  /// 直连 `GET /repos/<repo>/releases/latest`，匿名可用（60 次/小时/IP，
+  /// 命中 ETag 的 304 不计数，客户端 24h 才真正请求一次）。
+  /// fork 或自建镜像可用 `--dart-define=UU_RELEASE_REPO=owner/repo` 覆盖。
+  static const String _envReleaseRepo = String.fromEnvironment('UU_RELEASE_REPO');
+  static const String releaseRepo =
+      _envReleaseRepo == '' ? 'huhao0208/remote-desktop' : _envReleaseRepo;
+
   /// 画质档位：value = `width,quality,bitrate`，见 docs/media-protocol.md §4。
   static const List<QualityPreset> qualityPresets = <QualityPreset>[
     QualityPreset('流畅', 1280, 55, 4000),

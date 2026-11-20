@@ -69,6 +69,26 @@ TURN 短时效凭据（HMAC-SHA1，与 coturn `use-auth-secret` 一致）、
 > 被控端仍是 `agent/agent.py`（Flutter 桌面版启动时以 `--token` 拉起随包分发的 `uu-agent`）。
 > v0.1.3 起 `uu-agent` 是**目录形态**（`uu-agent` + `_internal/`），冷启 0.15s；单独部署时整目录一起拷。
 
+## 自动升级（v0.2.0 起）
+
+三个组件都能自己发现新版本，统一走 GitHub Release（仓库公开，匿名可读，带 `sha256` digest）：
+
+| 组件 | 触发时机 | 行为 |
+|---|---|---|
+| 客户端 | 启动 3s 后 + 每 24h 节流；或「我的 → 检查更新」 | **只提示不静默装**；下载后校验 sha256 再替换，失败自动回滚；可「跳过此版本」 |
+| 被控端 `uu-agent` | 启动 60s 后 + 每 24h | 静默下载，**空闲时**（两分钟无收发）替换并自重启；跑在 `.app` 内则跳过（保护签名与屏幕录制授权） |
+| 服务端 | 手动或 cron | `deploy/nas/upgrade.sh --yes`：checkout 最新 tag + 重建容器；`--rollback` 回退 |
+
+版本号单一真源是根目录 `VERSION`，由 `scripts/gen_version.py` 注入三端
+（`version.g.dart` / `agent/_version.py` / `srv2/_version.py` + `pubspec.yaml`），
+CI 会校验漂移。`uu-agent --version` 与 `GET /healthz` 都能读到版本。
+
+平台限制与回滚办法见 **`docs/auto-update.md`**，其中两条要提前知道：
+
+- **macOS**：ad-hoc 签名每次换包 cdhash 都变 → 屏幕录制/辅助功能**需要重新授权一次**（无 Developer ID 时无解）
+- **Android**：覆盖安装要求签名一致；CI 未配固定 keystore 时用 debug 签名，**应用内升级会失败**，
+  这一版请手动下载覆盖（配置方法见 `docs/auto-update.md §5.2`）
+
 ## 手机远程控制电脑（自研轻量链路）
 
 ```

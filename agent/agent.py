@@ -36,14 +36,30 @@ import websockets
 from PIL import Image
 
 try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.agent）都要能用
+    from ._version import VERSION as AGENT_VERSION
     from .clipboard_sync import ClipboardSync
     from .screens import grab_screencapture, list_monitors
 except ImportError:
+    from _version import VERSION as AGENT_VERSION
     from clipboard_sync import ClipboardSync
     from screens import grab_screencapture, list_monitors
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
+
+# 最近一次收发报文的时间（秒）。自更新靠它判断「现在有没有人在用」——
+# 远控进行中重启 agent 会直接断链，所以只在空闲时替换。
+LAST_ACTIVITY = 0.0
+
+
+def mark_activity() -> None:
+    global LAST_ACTIVITY
+    LAST_ACTIVITY = time.time()
+
+
+def is_busy(window: float = 120.0) -> bool:
+    """两分钟内有任何收发，就认为正在被使用。"""
+    return time.time() - LAST_ACTIVITY < window
 
 
 def _new_mss():
@@ -408,6 +424,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         streaming.set()  # 默认推流；控制页可发 pause/resume
 
         async def send_json(obj: dict) -> None:
+            mark_activity()
             await ws.send(json.dumps(obj, ensure_ascii=False))
 
         # 运行时画质参数（控制页 stream.config 可动态调，无需重启 Agent）
@@ -679,6 +696,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                     except asyncio.TimeoutError:
                         continue
                     await ws.send(data)  # 发不完时 capture 侧自动丢帧
+                    mark_activity()
             finally:
                 stop.set()
                 cap.cancel()
@@ -698,6 +716,9 @@ LAST_DEVICE: str | None = None  # 断线重连时复用，避免旧服务端堆�
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="轻量远程桌面 Agent")
+    # --version 用 argparse 的 version action：它在必填参数校验之前就触发退出，
+    # 所以 `uu-agent --version` 不需要 --server 也能跑（自更新逻辑靠它取当前版本）。
+    ap.add_argument("--version", action="version", version=f"uu-agent {AGENT_VERSION}")
     ap.add_argument("--server", required=True, help="https://<host>:8443")
     ap.add_argument("--mobile", help="登录手机号（与控制页一致）")
     ap.add_argument("--token", help="复用已有登录 token（App 一体化模式，不重复登录）")
@@ -717,9 +738,22 @@ def main() -> int:
     ap.add_argument("--new-device", action="store_true",
                     help="强制注册一台新设备（会重写 ~/.uu-agent/device_id）")
     ap.add_argument("--insecure", action="store_true", help="跳过证书校验（自签调试）")
+    ap.add_argument("--no-update", action="store_true",
+                    help="关闭被控端自更新（默认开；仅在 PyInstaller 打包产物里生效）")
     args = ap.parse_args()
     if not args.mobile and not args.token:
         ap.error("需要 --mobile 或 --token 之一")
+    print(f"[agent] uu-agent {AGENT_VERSION}（{platform.system()} {platform.machine()}）",
+          flush=True)
+    if not args.no_update:
+        try:
+            try:
+                from .updater import start_background as _start_updater
+            except ImportError:
+                from updater import start_background as _start_updater
+            _start_updater(busy=is_busy)
+        except Exception as e:  # 自更新不可用不能影响主链路
+            print(f"[agent] 自更新未启用：{e}", file=sys.stderr, flush=True)
     while True:
         try:
             asyncio.run(run(args, reuse_device=LAST_DEVICE))

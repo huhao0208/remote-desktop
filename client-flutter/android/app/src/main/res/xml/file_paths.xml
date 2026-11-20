@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自动升级用：把下载到 cache 目录的 APK 以 content:// URI 交给系统安装器。
+  Dart 侧下载目录是 Directory.systemTemp（Android 上即 /data/user/0/<pkg>/cache），
+  所以 cache-path 必须覆盖到根。
+-->
+<paths>
+    <cache-path name="uu_cache" path="." />
+    <files-path name="uu_files" path="." />
+    <external-cache-path name="uu_external_cache" path="." />
+</paths>

@@ -40,6 +40,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+try:  # 脚本直跑与包内导入（含 PyInstaller 打包）都要能用
+    from ._version import VERSION as SERVER_VERSION
+except ImportError:
+    from _version import VERSION as SERVER_VERSION
+
 # ---------------------------------------------------------------- 配置
 
 PUBLIC_BASE = os.environ.get("UU_PUBLIC_BASE", "https://api.nrd.nie.163.com").rstrip("/")
@@ -235,7 +240,7 @@ def room_config(row: sqlite3.Row, uid: str) -> Dict[str, Any]:
 
 # ---------------------------------------------------------------- 应用
 
-app = FastAPI(title="UU Remote Self-Hosted", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="UU Remote Self-Hosted", version=SERVER_VERSION, docs_url=None, redoc_url=None)
 
 
 @app.middleware("http")
@@ -265,8 +270,9 @@ async def healthz() -> Any:
     online = set()
     for devs in peers.values():
         online.update(d for d, lst in devs.items() if lst)
-    return {"ok": True, "ts": now_ms(), "rooms": len(rooms_by_token),
-            "devices_online": len(online)}
+    # version 供客户端/升级脚本判断服务端是否需要升级（deploy/nas/upgrade.sh --check）
+    return {"ok": True, "ts": now_ms(), "version": SERVER_VERSION,
+            "rooms": len(rooms_by_token), "devices_online": len(online)}
 
 
 def device_online(device_id: str) -> bool:

@@ -267,6 +267,20 @@ Capacitor 安卓/iOS 产物已停止发布，见 §9.3（v0.1.1 里还能下到�
 `armeabi-v7a`/`armeabi` 选后者。装错会提示「应用未安装」（架构不匹配，不是包坏了）。
 v0.1.2 之前是 83.7 MB 的全 ABI 单包，拆分后体积降到 **29.4 MB（-65%）**。
 
+### 9.2.1 自更新专用资产（v0.2.0 起）
+
+被控端自更新只想要 agent 自己（47 MB），不该为升级下 130 MB 的服务端包，所以 CI 额外产出：
+
+| 资产 | 内容 | 谁用 |
+|---|---|---|
+| `uu-agent-macos-arm64.tar.gz` | onedir 内容打平到归档根（`uu-agent` + `_internal/`） | macOS 上独立部署的 agent |
+| `uu-agent-windows-x64.zip` | 同上（`uu-agent.exe` + `_internal/`） | Windows agent |
+| `uu-agent-linux-x64.tar.gz` | 同上 | Linux agent |
+| `SHA256SUMS` | `sha256sum` 格式的全资产清单 | 客户端/agent 在 GitHub `digest` 缺失时兜底校验 |
+
+归档根就是安装目录内容，`agent/updater.py` 解压后直接覆盖安装目录即可。
+客户端**不用**这些资产（它下的是自己平台的完整客户端包）。详见 `docs/auto-update.md §3`。
+
 被控端首次运行需要在系统里授权：macOS 给「屏幕录制 + 辅助功能」，Windows/Linux 视系统而定。
 
 **iOS 没有发布产物**：CI 不产出 ipa（`flutter build ios --no-codesign` 出来的未签名 `.app`

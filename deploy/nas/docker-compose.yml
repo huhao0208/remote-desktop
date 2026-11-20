@@ -43,3 +43,16 @@ services:
 
 volumes:
   uu-data:
+
+# 可选：完全自动跟随新版本。
+# 注意本文件用的是 `build:` 而不是 `image:`，watchtower 只能拉 registry 里的镜像，
+# 对本地 build 无效。所以有两种做法：
+#   a) 推荐：cron 每天跑一次 deploy/nas/upgrade.sh --yes（会 checkout tag + 重建）
+#      0 4 * * *  cd /path/to/repo/deploy/nas && ./upgrade.sh --yes >> upgrade.log 2>&1
+#   b) 把镜像推到自己的 registry，把上面的 build 换成 image，再启用下面这段：
+# watchtower:
+#   image: containrrr/watchtower
+#   restart: unless-stopped
+#   volumes:
+#     - /var/run/docker.sock:/var/run/docker.sock
+#   command: --interval 86400 --cleanup

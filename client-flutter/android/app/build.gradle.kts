@@ -4,6 +4,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// 固定 release 签名（自动升级的前提，见 docs/auto-update.md §4）：
+// 覆盖安装要求新包与已装包的签名一致。以前固定用 debug key，换台构建机签名就变，
+// 用户点「升级」只会得到「应用未安装」。CI 从 secrets 还原 key.properties + keystore；
+// 本地没有这个文件时自动回退 debug 签名（行为与之前完全一致，不阻断构建）。
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = java.util.Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+}
+
 android {
     namespace = "com.huhao.uu_remote"
     compileSdk = flutter.compileSdkVersion
@@ -29,11 +39,25 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // 有正式签名就用正式签名；没有就回退 debug，保证本地/无 secrets 的 CI 仍能出包
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }
