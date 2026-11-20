@@ -135,9 +135,14 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
    可安装可运行，**不能上架**；正式发布需补 keystore 与 `signingConfigs`。
 3. macOS 产物是 **ad-hoc 签名**（不是 Developer ID，也没公证）：不签会因
    `app-sandbox=true` 在沙箱初始化时 SIGTRAP 崩溃，所以 CI 必须签；用户首次打开仍需
-   `xattr -dr com.apple.quarantine` 或右键「打开」，且只能自用、不能分发给别人的 Mac（详 §9.4 第 1 条）。
-   覆盖分发需 Developer ID 证书 + `notarytool`。
+   `xattr -dr com.apple.quarantine` 或右键「打开」，且只能自用、不能分发给别人的 Mac
+   （详 §9.4 第 1 条）；要对外分发需 Developer ID 证书 + `notarytool`。
 4. Linux 产物依赖 runner 的 glibc（ubuntu-latest，2.39+），老发行版需自行降级构建环境。
+5. **macOS runner 偶发排队 15 分钟后被 GitHub 直接 cancel**——这不是代码失败。判断依据：
+   打开该 job，`started_at` 有值但 `runner_name` 为空、`steps` 列表为空，说明从头到尾
+   没分配到机器（真失败一定会有具体的失败 step）。处理：`gh run rerun <run-id> --failed`
+   重跑即可，通常第二次就能拿到 runner。**不要因此把 macOS 构建改成只在 tag 触发**——
+   这台开发机没有 Xcode，CI 是产出 macOS 客户端的唯一途径。
 
 ## 8. 遗留风险
 
