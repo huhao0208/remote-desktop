@@ -301,7 +301,12 @@ class _UpdateDialogState extends State<UpdateDialog> {
     }
 
     final UpdateCheckResult? r = _result;
-    final bool canUpgrade = r != null && r.hasUpdate && r.info != null && _error == null;
+    // skipped 也要能升级：用户点了「跳过此版本」之后，下次进来仍要能改主意，
+    // 否则会卡在「已跳过」状态一直到下个版本出现。
+    final bool canUpgrade = r != null &&
+        (r.status == UpdateStatus.available || r.status == UpdateStatus.skipped) &&
+        r.info != null &&
+        _error == null;
 
     if (canUpgrade) {
       return <Widget>[
