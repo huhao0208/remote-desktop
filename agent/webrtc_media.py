@@ -90,6 +90,7 @@ class ScreenTrack(VideoStreamTrack):
         self._last: Optional[Image.Image] = None      # 上一张成功帧（超时时复制）
         self._notified: set = set()
         self._fails_run = 0                            # 连续失败次数（成功即归零）
+        self._last_probe = 0.0                         # 上次回探 mss 的时间
         self.available = self._check_screen()
 
     # ------------------------------------------------------------ 自检/告警
@@ -181,6 +182,16 @@ class ScreenTrack(VideoStreamTrack):
     # ------------------------------------------------------------ 取帧
 
     async def _next_image(self) -> Optional[Image.Image]:
+        # 0) 用 screencapture 兜着时，每 30s 回探一次 mss：显示器唤醒/授权恢复后
+        #    应当自动切回 30fps 通道，而不是永久停在 2–3fps 的降级后端
+        if self.backend == "pil" and time.monotonic() - self._last_probe > 30:
+            self._last_probe = time.monotonic()
+            try:
+                if any(m.get("source") == "mss" for m in list_monitors()):
+                    self.backend = "mss"
+                    self._log("[agent] mss 抓屏恢复可用，切回 mss 通道")
+            except Exception:
+                pass
         # 1) 上一次超时后仍在跑的抓屏完成了？收下结果，避免线程越积越多
         if self._pending is not None and self._pending.done():
             try:

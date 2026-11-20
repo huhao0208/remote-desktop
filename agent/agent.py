@@ -376,6 +376,9 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                     audio_device=args.audio_device,
                     monitor=cur_screen,
                     screen_count=max(1, len(screens)),
+                    # 必须带 flush：stdout 被重定向到管道/文件时 print 会块缓冲，
+                    # 日志要实时可见（QA 抓日志、联调对表都依赖这个）
+                    log=lambda m: print(m, flush=True),
                 )
             except Exception as e:  # aiortc 未安装等 → 自动退回 JPEG
                 print(f"[agent] WebRTC 不可用（{e}），退回 JPEG 推流", flush=True)
