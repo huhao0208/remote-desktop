@@ -205,6 +205,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build embedded agent (被控端，随 App 一体分发)
+        working-directory: .          # 回到仓库根，agent/ 与 dist 路径才成立
         shell: bash
         run: |
           pip install pyinstaller mss pillow pyautogui httpx websockets
@@ -215,6 +216,8 @@ jobs:
             agent/agent.py
       - name: Install deps
         run: npm install --no-audit --no-fund
+      - name: Sync control page into client
+        run: node scripts/sync-web.js
       - name: Build client
         run: npx electron-builder ${{ matrix.build }} --publish never
         env:
