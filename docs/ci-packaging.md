@@ -98,7 +98,30 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 6. **Termux / 源码包不装 aiortc 时**，`agent.py` 会自动退回 JPEG（try/except），属预期降级；
    需要 WebRTC 就在 Termux 里 `pip install aiortc av numpy`（Termux 有 aarch64 轮子，编译慢）。
 
-## 7. 遗留风险
+## 7. Flutter 控制端（client-flutter，3 个构建 job）
+
+`flutter-verify` 是门禁，三个 `flutter-build-*` 都 `needs: flutter-verify`，只有 analyze/test
+通过才会跑；`release` job 的 `needs` 也已包含这三个 job，tag 发布时产物一并上传。
+
+| job | runner | 关键依赖 | 产物（artifact 名 / 大小） |
+|---|---|---|---|
+| `flutter-verify` | ubuntu-latest | `subosito/flutter-action@v2`，钉 `stable / 3.50.1`（Dart 3.14，pubspec 要求 sdk ≥3.13） | 无（只跑 `flutter pub get` / `analyze --fatal-infos` / `test`） |
+| `flutter-build-macos` | macos-latest (arm64) | runner 自带 Xcode + CocoaPods；工程无第三方原生插件，`macos/Runner/Release.entitlements` 已开 `com.apple.security.network.client`（沙箱内联网必需） | `uu-remote-client-flutter-macos` / `.app` 目录自动打包，约 53 MB |
+| `flutter-build-linux` | ubuntu-latest | `apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev`（Flutter Linux 桌面必需，缺 GTK 会直接 cmake 失败） | `uu-remote-client-flutter-linux` / `build/linux/x64/release/bundle` 目录，约 10 MB |
+| `flutter-build-android` | ubuntu-latest | `actions/setup-java@v4` temurin **JDK 17** + runner 自带 Android SDK（无需 setup-android） | `uu-remote-client-flutter-android` / `uu-remote-client-flutter-android.apk`，约 24 MB |
+
+已知限制：
+
+1. **`lib/` 曾被 `.gitignore` 整条忽略**（裸 `lib/` 规则会匹配任意层级的 `lib/`），
+   导致 `client-flutter/lib/**` 从未入库、CI 报 `Target of URI doesn't exist: package:uu_remote/...`。
+   现已改为根锚定的 `/lib/`，**新增 Flutter 目录时注意别再写裸路径规则**。
+2. Android 产物用 **debug key 签名**（`flutter build apk --release` 未配 `key.properties`），
+   可安装可运行，**不能上架**；正式发布需补 keystore 与 `signingConfigs`。
+3. macOS 产物未签名/未公证，用户首次打开需右键「打开」或在系统设置里放行；
+   覆盖分发需 Developer ID 证书 + `notarytool`。
+4. Linux 产物依赖 runner 的 glibc（ubuntu-latest，2.39+），老发行版需自行降级构建环境。
+
+## 8. 遗留风险
 
 - **Windows / Linux 只验证了轮子存在与参数正确，没在真机跑过**。首次 CI 跑绿后建议顺手
   检查日志里 Agent 是否打印 `[rtc] answer 已发`（说明 aiortc 真的起来了）。
