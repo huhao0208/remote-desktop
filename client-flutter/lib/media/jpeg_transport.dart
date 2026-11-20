@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/widgets.dart';
 
 import '../core/models.dart';
@@ -12,9 +13,9 @@ import 'media_transport.dart';
 /// 帧格式（协议 §6，不变）：`"FRM1"` + 8 字节大端毫秒时间戳 + JPEG 数据。
 /// 老 Agent 也可能只发 `"FRM1"` + JPEG（无时间戳），这里兼容两种。
 ///
-/// ⚠️ 临时方案：`Image.memory` 每帧都会走一次解码+上传纹理，1080p@30 时 CPU/GPU
-/// 开销很大，且会有 1 帧闪烁。P0-3 接入 WebRTC 后改用 `Texture`；在此之前它只是
-/// 保证「能看见画面」的兜底。
+/// ⚠️ 兜底方案：`Image.memory` 每帧都会走一次解码+上传纹理，1080p@30 时 CPU/GPU
+/// 开销很大，且会有 1 帧闪烁。`agent.hello.media == "webrtc"` 时走
+/// [WebRtcTransport]（原生纹理），只有 WebRTC 不可用/断链才回落到这里。
 class JpegTransport implements MediaTransport {
   final ValueNotifier<Uint8List?> _latest = ValueNotifier<Uint8List?>(null);
   final StreamController<FramePacket> _frames = StreamController<FramePacket>.broadcast();
@@ -31,6 +32,10 @@ class JpegTransport implements MediaTransport {
 
   @override
   Stream<FramePacket> get frames => _frames.stream;
+
+  /// JPEG 没有 `getStats()`：帧数由页面自己数，这里保持缺省。
+  @override
+  ValueListenable<TransportStats>? get stats => null;
 
   @override
   Future<void> start({
@@ -70,7 +75,7 @@ class JpegTransport implements MediaTransport {
         if (frame == null) {
           return const MediaPlaceholder(text: '已连接信令，等待被控端画面…');
         }
-        // TODO(P0-3): 换成 WebRTC 的 Texture，去掉这层每帧重编码。
+        // 每帧重编码的成本只在这个兜底分支里；WebRTC 通路走 RTCVideoView
         return Image.memory(
           frame,
           fit: fit,

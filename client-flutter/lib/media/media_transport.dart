@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 
 import '../core/models.dart';
@@ -16,10 +17,26 @@ class FramePacket {
   final Duration latency;
 }
 
+/// 通路的实时统计，只给 HUD 用。
+///
+/// JPEG 通路的 fps 由页面自己数帧；WebRTC 没有帧流（画面在原生纹理里），只能读
+/// `pc.getStats()` 的 `inbound-rtp`，所以统一从这个结构体出。
+class TransportStats {
+  const TransportStats({this.fps = 0, this.width = 0, this.height = 0});
+
+  final int fps;
+
+  /// 解码后的实际画面尺寸（协议 §7：必须等于 `stream.config.width`，不因带宽缩）
+  final int width;
+  final int height;
+
+  bool get hasVideo => width > 0 && height > 0;
+}
+
 /// 媒体通路抽象。
 ///
 /// 页面只依赖这个接口：`agent.hello` 里 `media == "webrtc"` 时换成
-/// [WebRtcTransport]，页面代码一行不用改（P0-3）。
+/// [WebRtcTransport]，页面只多读一个 [stats]（HUD），其余逻辑不变。
 abstract class MediaTransport {
   /// `jpeg` | `webrtc`，与协议的 `media` 字段取值一致。
   String get kind;
@@ -28,6 +45,9 @@ abstract class MediaTransport {
   String get label;
 
   Stream<FramePacket> get frames;
+
+  /// WebRTC 专用统计源；JPEG 通路返回 `null`（页面按帧流自己数 fps）。
+  ValueListenable<TransportStats>? get stats => null;
 
   Future<void> start({
     required AgentHello hello,

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
@@ -16,6 +17,7 @@ import '../core/theme.dart';
 import '../media/jpeg_transport.dart';
 import '../media/media_factory.dart';
 import '../media/media_transport.dart';
+import '../media/webrtc_transport.dart';
 import '../signaling/signaling_client.dart';
 import '../widgets/ui_kit.dart';
 
@@ -43,6 +45,7 @@ class _RemotePageState extends State<RemotePage> {
 
   StreamSubscription<Map<String, dynamic>>? _msgSub;
   StreamSubscription<FramePacket>? _frameSub;
+  ValueListenable<TransportStats>? _statsListenable;
   Timer? _ticker;
   Timer? _chromeTimer;
 
@@ -60,6 +63,9 @@ class _RemotePageState extends State<RemotePage> {
   int _framesInWindow = 0;
   Duration _latency = Duration.zero;
   DateTime? _lastFrameAt;
+
+  /// WebRTC 的 getStats() 结果（JPEG 通路恒为空，HUD 走 [_fps]）。
+  TransportStats _stats = const TransportStats();
 
   final FocusNode _focusNode = FocusNode(debugLabel: 'remote-keyboard');
   final Set<String> _heldMods = <String>{};
@@ -101,6 +107,8 @@ class _RemotePageState extends State<RemotePage> {
     _heldMods.clear();
     // 退出页面时若仍在全屏，恢复窗口，避免把整个 App 卡在全屏
     if (_fullscreen) _setFullscreen(false);
+    _statsListenable?.removeListener(_onStats);
+    _statsListenable = null;
     _transport?.dispose();
     _signaling?.close();
     _api.close();
@@ -147,6 +155,9 @@ class _RemotePageState extends State<RemotePage> {
     _frameSub = null;
     await _msgSub?.cancel();
     _msgSub = null;
+    _statsListenable?.removeListener(_onStats);
+    _statsListenable = null;
+    _stats = const TransportStats();
     await _transport?.dispose();
     _transport = null;
     await _signaling?.close();
@@ -217,6 +228,8 @@ class _RemotePageState extends State<RemotePage> {
 
     await _frameSub?.cancel();
     _frameSub = null;
+    _statsListenable?.removeListener(_onStats);
+    _statsListenable = null;
     final MediaTransport? old = _transport;
     _transport = null;
     await old?.dispose();
@@ -228,22 +241,93 @@ class _RemotePageState extends State<RemotePage> {
         await transport.dispose();
         return;
       }
+      if (transport is WebRtcTransport) {
+        // 运行中 failed/disconnected → 回落 JPEG（协议 §5）
+        transport.onFallback = _fallbackFromWebRtc;
+      }
       setState(() => _transport = transport);
+      _bindStats(transport);
       _frameSub = transport.frames.listen(_onFrame);
-    } on UnsupportedError {
-      // WebRTC 通路未接入 → 回落 JPEG（协议 §5：Agent 未连上 RTC 时仍在推 JPEG）
+      if (transport is WebRtcTransport) {
+        // 协商期（answer 之前）就失败的，上面那个回调来不及接住，这里补一刀
+        final String? reason = transport.fallbackReason;
+        if (reason != null) await _fallbackFromWebRtc(reason);
+      }
+    } catch (e) {
       await transport.dispose();
-      final JpegTransport fallback = JpegTransport();
-      await fallback.start(hello: hello, room: room, signaling: signaling);
-      if (!mounted) {
-        await fallback.dispose();
+      if (!hello.isWebRtc) {
+        if (mounted) setState(() => _error = '画面通路初始化失败：$e');
         return;
       }
-      setState(() => _transport = fallback);
-      _frameSub = fallback.frames.listen(_onFrame);
-      _toast('H.264 通路尚未接入，已回落 JPEG（画面为临时方案）');
+      // WebRTC 起不来（平台不支持 / 建 PC 失败）→ JPEG 兜底（协议 §5）
+      final bool ok = await _installJpegFallback(hello, room, signaling);
+      if (!mounted) return;
+      if (ok) {
+        _toast('H.264 直连不可用，已回落 JPEG：$e');
+      }
     }
     _applyQuality();
+  }
+
+  /// 装 JPEG 兜底通路；成功返回 true。
+  Future<bool> _installJpegFallback(
+    AgentHello hello,
+    RoomConfig room,
+    SignalingClient signaling,
+  ) async {
+    final JpegTransport fallback = JpegTransport();
+    try {
+      await fallback.start(hello: hello, room: room, signaling: signaling);
+    } catch (e) {
+      await fallback.dispose();
+      if (mounted) setState(() => _error = '画面通路初始化失败：$e');
+      return false;
+    }
+    if (!mounted) {
+      await fallback.dispose();
+      return false;
+    }
+    setState(() => _transport = fallback);
+    _bindStats(fallback);
+    _frameSub = fallback.frames.listen(_onFrame);
+    return true;
+  }
+
+  /// WebRTC 中途断链（`connectionState` failed/disconnected）→ 切回 JPEG。
+  Future<void> _fallbackFromWebRtc(String reason) async {
+    final RoomConfig? room = _room;
+    final SignalingClient? signaling = _signaling;
+    final AgentHello? hello = _hello;
+    if (!mounted || _transport is! WebRtcTransport) return;
+    if (room == null || signaling == null || hello == null) return;
+
+    await _frameSub?.cancel();
+    _frameSub = null;
+    _statsListenable?.removeListener(_onStats);
+    _statsListenable = null;
+    final MediaTransport? old = _transport;
+    _transport = null;
+    _stats = const TransportStats();
+    if (mounted) setState(() {});
+    await old?.dispose();
+
+    final bool ok = await _installJpegFallback(hello, room, signaling);
+    if (ok && mounted) _toast('H.264 直连中断（$reason），已回落 JPEG');
+  }
+
+  void _bindStats(MediaTransport transport) {
+    _statsListenable?.removeListener(_onStats);
+    _statsListenable = transport.stats;
+    _statsListenable?.addListener(_onStats);
+  }
+
+  /// WebRTC 没有帧流，喂看门狗和 fps 的只有 getStats()。
+  void _onStats() {
+    final TransportStats? stats = _statsListenable?.value;
+    if (stats == null) return;
+    if (stats.fps > 0) _lastFrameAt = DateTime.now();
+    if (!mounted) return;
+    setState(() => _stats = stats);
   }
 
   void _applyQuality() {
@@ -599,6 +683,20 @@ class _RemotePageState extends State<RemotePage> {
 
   List<Widget> _hud() {
     final AgentHello? hello = _hello;
+    final bool webRtc = _transport?.kind == 'webrtc';
+    if (webRtc) {
+      // 协议 §7 要求的 HUD：编码 · 实际 fps · 实际分辨率（来自 getStats）
+      final int w = _stats.width > 0 ? _stats.width : (hello?.width ?? 0);
+      final int h = _stats.height > 0 ? _stats.height : (hello?.height ?? 0);
+      return <Widget>[
+        HudChip(
+          text: 'H.264 · ${_stats.fps} fps · $w×$h',
+          icon: Icons.bolt,
+          color: _stats.fps >= 24 ? AppColors.accentHover : AppColors.warn,
+        ),
+        const SizedBox(width: AppSpace.xs),
+      ];
+    }
     return <Widget>[
       HudChip(text: '$_fps fps', icon: Icons.speed, color: _fps >= 24 ? AppColors.accentHover : AppColors.videoMuted),
       if (hello != null && hello.width > 0)
@@ -746,7 +844,8 @@ class _RemotePageState extends State<RemotePage> {
     if (_stalled) return '画面中断，等待新帧…';
     final AgentHello? hello = _hello;
     if (hello == null) return '已连接';
-    return '实时 · ${hello.name}（${hello.os}）· ${hello.isWebRtc ? 'WebRTC 直连' : 'JPEG 兜底'}';
+    final bool webRtc = _transport?.kind == 'webrtc';
+    return '实时 · ${hello.name}（${hello.os}）· ${webRtc ? 'WebRTC 直连' : 'JPEG 兜底'}';
   }
 
   Color _statusColor() {
@@ -817,6 +916,9 @@ class _RemotePageState extends State<RemotePage> {
     if (transport == null) {
       return _waitingView();
     }
+    // 画面（JPEG 的 Image.memory / WebRTC 的 RTCVideoView）都挂在 _stage 里那层
+    // Listener 之下，因此鼠标/触摸事件的 localPosition 与归一化几何完全一致：
+    // 换通路不需要改坐标换算（协议 §6：x/y ∈ [0,1] 不变）。
     return transport.buildView(fit: BoxFit.contain);
   }
 

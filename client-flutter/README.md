@@ -1,7 +1,8 @@
 # client-flutter · UU Remote 控制端（Flutter 骨架）
 
 Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`client-mobile` 行为一致：
-**登录 → 设备列表 → 远控**。v1 先用 JPEG 兜底通路，WebRTC(H.264) 只留接口。
+**登录 → 设备列表 → 远控**。画面走 WebRTC（H.264 / SRTP over UDP），`agent.hello.media == "jpeg"`
+时自动用 JPEG 兜底通路。
 
 - 协议依据：`../docs/media-protocol.md`（FROZEN v1）
 - 服务端：`../srv2/server.py`（本仓库代码**一行不改**）
@@ -18,15 +19,16 @@ Flutter 版控制端，目标是与 `srv2/control.html`、`client-desktop`、`cl
 | 设备列表（`POST /api/v1/device/list`），在线/本机/可控标记 | ✅ |
 | 进房间（`POST /api/v1/room/join/by_device/{id}`）→ 连 `wss://.../ws/signaling` | ✅ |
 | `agent.hello` 解析（含 `media` 缺省按 `jpeg` 兜底） | ✅ |
-| JPEG 帧渲染（`FRM1` + 8B 时间戳 + JPEG） | ✅ **临时方案**，P0-3 换 `Texture` |
+| **WebRTC 收流（H.264 / `RTCVideoView`）** | ✅ **主通路**，见第 5 节 |
+| JPEG 帧渲染（`FRM1` + 8B 时间戳 + JPEG） | ✅ 兜底通路（`Image.memory`，临时方案） |
 | 输入转发（move / click / scroll / text / press / keydown / keyup） | ✅ 坐标归一化 0..1 |
-| `stream.config` 画质切换（流畅/高清/超清） | ✅ |
-| `MediaTransport` 抽象 + `JpegTransport` / `WebRtcTransport` | ✅ 抽象就位 |
-| WebRTC `rtc.offer/answer/ice` | ❌ 见 `lib/media/webrtc_transport.dart` 的 TODO |
-| 关机 `shutdown` UI、文件传输、剪贴板 | ❌ 未做（协议已就绪） |
+| `stream.config` 画质切换（流畅/高清/超清，含 bitrate） | ✅ |
+| `MediaTransport` 抽象 + `JpegTransport` / `WebRtcTransport` | ✅ |
+| WebRTC `rtc.offer/answer/ice/close` | ✅ 见 `lib/media/webrtc_transport.dart` |
+| 关机 `shutdown` UI、文件传输、剪贴板、音频、多屏 | ❌ 未做（协议 v2 已就绪，只留挂点） |
 
-骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze` → **No issues found**，
-`flutter test` → 10 passed，`flutter build bundle`（Dart 全量编译）通过。
+骨架代码已在 Flutter 3.50.1 上验证：`flutter analyze --fatal-infos` → **No issues found**，
+`flutter test` → 22 passed，`flutter build bundle`（Dart 全量编译）通过。
 
 ---
 
@@ -47,9 +49,10 @@ lib/
   signaling/
     signaling_client.dart   房间 WS：文本=JSON、二进制=画面帧，双向流
   media/
-    media_transport.dart    MediaTransport 抽象 + FramePacket + 占位视图
+    media_transport.dart    MediaTransport 抽象 + FramePacket + TransportStats + 占位视图
     jpeg_transport.dart     JPEG 兜底（FRM1 解析 + Image.memory）
-    webrtc_transport.dart   WebRTC 占位 + 详细接入 TODO
+    webrtc_transport.dart   WebRTC 收流：协商 / RTCVideoView / getStats / failed 回调
+    rtc_signaling.dart      ice_servers 转换 + rtc.offer/rtc.ice 载荷（纯函数，可单测）
     media_factory.dart      按 agent.hello.media 选通路
   pages/
     login_page.dart
@@ -57,6 +60,7 @@ lib/
     remote_page.dart        远控：HUD / 画质 / 鼠标键盘触控映射
 test/
   protocol_test.dart        协议字段解析、信令地址组装、FRM1 帧头
+  rtc_signaling_test.dart   ice_servers 转换、rtc.offer/rtc.ice 载荷
 ```
 
 ### 页面 → 通路 的解耦点
@@ -68,15 +72,16 @@ abstract class MediaTransport {
   String get kind;
   String get label;
   Stream<FramePacket> get frames;
+  ValueListenable<TransportStats>? get stats => null;  // 仅 WebRTC 有（getStats）
   Future<void> start({required AgentHello hello, required RoomConfig room, required SignalingClient signaling});
   Widget buildView({required BoxFit fit});
   Future<void> dispose();
 }
 ```
 
-接 WebRTC 时只需实现 `WebRtcTransport` 并让 `createTransport()` 返回它，**远控页不动**。
-`agent.hello.media == "webrtc"` 但 `WebRtcTransport.start()` 抛 `UnsupportedError` 时，远控页会
-自动回落到 `JpegTransport` 并提示——对应协议 §5 的降级表。
+`createTransport()` 按 `agent.hello.media` 选实现；`start()` 抛错或运行中
+`connectionState` 变 `failed/disconnected` 时，远控页自动切回 `JpegTransport` 并 toast
+——对应协议 §5 的降级表（细节见第 5.3 节）。
 
 ---
 
@@ -159,50 +164,119 @@ flutter create --platforms=macos,windows,linux,android,ios \
 
 ---
 
-## 5. 如何接 WebRTC（P0-3）
+## 5. WebRTC 通路（H.264，已接入）
 
-1. `pubspec.yaml` 加 `flutter_webrtc`。
-2. 按 `lib/media/webrtc_transport.dart` 顶部 TODO 实现：
-   - `createPeerConnection({'iceServers': room.iceServers})`（服务端下发的结构可直接透传）
-   - `addTransceiver(video, RecvOnly)`，`degradationPreference = maintain-resolution`
-   - `createOffer` → 发 `{"p":"rtc.offer","sdp":...,"ice":room.iceServers}`
-   - 收 `rtc.answer` → `setRemoteDescription`；`rtc.ice` → `addCandidate`；本地 ICE → 发 `rtc.ice`
-   - `onTrack` → `RTCVideoRenderer`，`buildView` 返回 `RTCVideoView`（**不要再走 Image.memory**）
-   - `onConnectionState` failed → 通知页面回落 JPEG
-3. macOS 需要在 `macos/Runner/DebugProfile.entitlements` 与 `Release.entitlements`
-   里保留 `com.apple.security.network.client`（模板默认已开）。
-4. 分辨率策略：不做超采样，`stream.config.width` 即目标宽度（协议 §3）。
+依赖 `flutter_webrtc: ^1.6.3`（底层 `dart_webrtc 1.8.2` / `webrtc_interface 1.5.1`）。
+实现在 `lib/media/webrtc_transport.dart`，协议依据 `docs/media-protocol.md` §2/§3/§5。
+
+### 5.1 怎么协商（trickle ICE，全部复用现有 `/ws/signaling`）
+
+```
+Flutter 控制端                                    Agent
+  rtc.offer {sdp, ice, peer}  ─────────────────►  建 RTCPeerConnection / 挂 ScreenTrack
+  ◄───────────── rtc.answer {sdp, bitrate}         createAnswer + setLocalDescription
+  rtc.ice {candidate, sdpMid, sdpMLineIndex} ◄──►  rtc.ice（双向，谁先 gather 谁先发）
+  ═════════ SRTP/UDP 媒体流（不经服务端）══════════
+  rtc.close（可选，离开房间/降级） ────────────►
+```
+
+1. `createPeerConnection({'iceServers': toRtcIceServers(room.iceServers), 'bundlePolicy': 'max-bundle'})`
+   —— 服务端 `build_ice()` 下发的是 `{stun: [...], turn: [...]}` 对象，`toRtcIceServers()`
+   转成插件要的 `[{urls, username, credential}]`；`rtc.offer.ice` 里则**原样透传**该对象
+   （Agent 两种形态都认，省一次请求）。
+2. `addTransceiver(kind: video, init: RTCRtpTransceiverInit(direction: RecvOnly))` —— 只收不发，
+   全程不申请摄像头/麦克风。
+3. `createOffer` → `setLocalDescription` → 发 `rtc.offer`（带 `peer = 本机 device_id`）。
+4. 收 `rtc.answer` → `setRemoteDescription(RTCSessionDescription(sdp, 'answer'))`。
+   早到的远端候选先缓存，answer 落地后补投（协议 §2.3）。
+5. `onTrack` → `RTCVideoRenderer.srcObject = event.streams[0]`；页面用 `RTCVideoView(renderer)`
+   渲染原生纹理，`BoxFit.contain` 保持 1:1 像素，不超采样。
+6. 远端候选 → `pc.addCandidate(RTCIceCandidate(candidate, sdpMid, sdpMLineIndex))`。
+
+### 5.2 清晰度（命门，别改）
+
+| 位置 | 设置 | 说明 |
+|---|---|---|
+| transceiver | **maintain-resolution** | flutter_webrtc 没有 `transceiver.degradationPreference`，等价写法是把 `RTCDegradationPreference.MAINTAIN_RESOLUTION` 写进 sender 的 RTP 参数（`sender.setParameters`）；recvonly 无 SSRC 时平台可能拒绝，已 catch，**不影响收流** |
+| 接收端渲染 | `BoxFit.contain` | 不做缩放，画面像素与编码分辨率 1:1 |
+| 被控端 | `stream.config.bitrate` | 页面切档位时随 `stream.config` 下发 4000/8000/20000 kbps，真正决定清晰度的是这条（Agent 侧 8 Mbps + 同策略） |
+| `jitterBufferTarget = 0` | ❌ 未实现 | 插件未暴露该参数，见「已知限制」 |
+
+HUD 显示 `H.264 · {fps} fps · {W}×{H}`，数据取自 `pc.getStats()` 的
+`inbound-rtp(kind=video)`：`framesPerSecond` / `frameWidth` / `frameHeight`
+（没有 `framesPerSecond` 时按 `framesDecoded` 差分自算）。
+
+### 5.3 失败怎么回落（协议 §5）
+
+| 时机 | 行为 |
+|---|---|
+| `start()` 抛错（平台不支持 / 建 PC 失败 / 无法初始化渲染器） | 页面 catch → 装 `JpegTransport` → toast「H.264 直连不可用，已回落 JPEG」 |
+| 协商期失败（`setRemoteDescription` 报错） | 传输层记下 `fallbackReason`，页面在 `start()` 返回后补查并回落 |
+| 运行中 `connectionState` = `failed` / `disconnected` | `onFallback` 回调 → 关 PC → 切回 JPEG → toast（含原因） |
+| 收到 `rtc.close` | 同上（对端主动收线，Agent 会恢复 JPEG 推流） |
+| 回落前后 | 传输层 dispose 时补发一条 `rtc.close`，避免 Agent 白推 WebRTC |
+
+回落是单向的：一次会话内不再自动重试 WebRTC，需要点「重新连接」（避免和 Agent 的重协商互踢）。
+
+### 5.4 iOS 需要什么 Info.plist 权限
+
+纯接收**不需要**摄像头/麦克风权限，`ios/Runner/Info.plist` 现在一项都不用加。需要补的只有：
+
+| 场景 | 键 | 值 |
+|---|---|---|
+| 连内网被控端（iOS 14+ 局域网访问弹窗） | `NSLocalNetworkUsageDescription` | 如「需要访问局域网内的被控设备以建立直连」 |
+| v2 音频（收被控端声音，**只播放不采集**） | 无需权限 | 仅 `AVAudioSession` 播放类别，`flutter_webrtc` 自己配 |
+| v2 若做「本机麦克风上行」 | `NSMicrophoneUsageDescription` | 说明文案，否则启动即崩 |
+
+macOS：沙盒必须开 `com.apple.security.network.client`（已在
+`macos/Runner/{DebugProfile,Release}.entitlements` 里）；如将来做音频上行再加
+`com.apple.security.device.audio-input`。
+
+平台最低版本要求（`flutter_webrtc` 1.6.3）：iOS ≥ 13.0、macOS ≥ 10.15 —— 本工程
+分别是 15.0 / 12.0，无需改动。
+
+### 5.5 输入与坐标（不变式）
+
+`RTCVideoView` 挂在远控页 `_stage` 那层 `Listener` 之下，与 JPEG 的 `Image.memory`
+共用同一套 `localPosition → 0..1` 归一化（`BoxFit.contain` 的留白偏移也一并算掉）。
+换通路不改任何协议字段：`{p:"input", t, x, y, ...}`、x/y ∈ [0,1]。
 
 ---
 
 ## 5.5 本地验证结果（Flutter 3.50.1 / macOS arm64）
 
 ```
-$ flutter pub get      → Changed 6 dependencies（material_ui / web_socket_channel 3.0.3 / window_manager 0.4.3 ...）
-$ flutter analyze      → No issues found!
-$ flutter test         → 00:00 +10: All tests passed!
-$ flutter build bundle → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
+$ flutter pub get                     → +9 dependencies（flutter_webrtc 1.6.3 / dart_webrtc 1.8.2 ...）
+$ flutter analyze --fatal-infos       → No issues found!
+$ flutter test                        → 00:25 +22: All tests passed!
+$ flutter build bundle                → 成功（kernel_blob.bin + flutter_assets，等价于 Dart 全量编译通过）
 ```
 
-**没做**：`flutter build macos/android/ios`（本机无 Xcode / Android SDK），`flutter run` 真机运行。
-平台构建请交给 CI（见下一节）。
+**没做**：`flutter build macos/android/ios`（本机无 Xcode / Android SDK），`flutter run` 真机运行，
+以及一次真实的 H.264 端到端联调（需要 Agent + 服务端在跑）。平台构建请交给 CI（见下一节）。
 
 ---
 
 ## 6. 已知限制
 
-1. **JPEG 渲染是临时方案**：`Image.memory` 每帧解码 + 上传纹理，1080p@30 时 CPU/GPU 占用高、
-   有 1 帧级抖动。P0-3 换 `Texture`（WebRTC）后删除 `jpeg_transport.dart` 的渲染分支即可。
-2. **WebRTC 未接入**，`media:"webrtc"` 时必定回落 JPEG（Agent 未连上 RTC 时仍在推 JPEG，所以能看见画面）。
-3. **没有自动重连**：WS 掉线后需点右上角「重新连接」（骨架期故意不做退避重试，避免掩盖问题）。
-4. **自签证书全放行**，仅适合自托管内网/测试环境。
-5. **移动端 UI 未在真机验证**（本机无 Android SDK / Xcode）；触控已按「单指移动=光标、轻点=左键、
+1. **JPEG 通路是兜底方案**：`Image.memory` 每帧解码 + 上传纹理，1080p@30 时 CPU/GPU 占用高、
+   有 1 帧级抖动。WebRTC 可用时不会走这条路。
+2. **WebRTC 未做真机联调**：代码路径、依赖与协议字段已对齐（`flutter analyze/test/build bundle` 全绿），
+   但 SDP 协商、TURN 兜底、`connectionState` 回落需要 Agent + 服务端在跑才能验证；
+   首次真机验证建议先看 HUD 的 fps 是否 > 0、分辨率是否等于档位宽度。
+3. **`jitterBufferTarget = 0` 未实现**：`flutter_webrtc` 未暴露该参数（协议 §3 建议项），
+   延迟目前靠 `playout-delay` 默认值 + 低抖动网络；要强制需改插件或改 SDP。
+4. **`degradationPreference` 是 best-effort**：recvonly sender 无 SSRC，部分平台 `setParameters` 返回 false
+   （已忽略）。清晰度实际由被控端码率/策略决定，本端只保证不缩放。
+5. **没有自动重连**：WS 掉线后需点右上角「重新连接」（骨架期故意不做退避重试，避免掩盖问题）；
+   WebRTC 断链后同样是「一次性回落 JPEG」，不自动重试 H.264。
+6. **自签证书全放行**，仅适合自托管内网/测试环境。
+7. **移动端 UI 未在真机验证**（本机无 Android SDK / Xcode）；触控已按「单指移动=光标、轻点=左键、
    长按 550ms=右键」实现，阈值未实测调优。
-6. **Android 9+ 不支持 `http://` 服务端**：默认未开 `usesCleartextTraffic`，请用 `https://`；
+8. **Android 9+ 不支持 `http://` 服务端**：默认未开 `usesCleartextTraffic`，请用 `https://`；
    若内网必须走明文，需在 `AndroidManifest.xml` 加网络明文策略（不推荐）。
-7. 关机按钮、文件传输、剪贴板同步未做。
-8. 键盘映射覆盖常用键；输入法（IME）组词走 `text` 事件，复杂中文输入未验证。
-9. 远控页的画质下拉、HUD 只在桌面端布局验证过（窄屏隐藏 HUD chips，但未做真机尺寸适配打磨）。
+9. **v2 能力未实现**：音频、剪贴板同步、多屏切换、修饰键状态机只留了挂点与 TODO 注释
+   （见 `webrtc_transport.dart` 末尾的表格）。
 10. **Android release 是 debug key 签名**，可安装调试、不能上架（换签名见第 7 节）。
 
 ---
@@ -237,6 +311,20 @@ flutter build bundle     # Dart 全量编译，但不出安装包
   `signingConfig = signingConfigs.getByName("debug")`）：能装能跑，**不能上架**。要发布需配
   keystore + `key.properties` 并换成 release signingConfig。
 - `build-ios` 未进 CI（需要签名证书）；如需验证编译可单独跑 `flutter build ios --no-codesign`。
+- **`flutter_webrtc` 带原生依赖，macOS/Linux/Android job 会明显变慢**：
+  - macOS：`flutter build macos` 会自动跑 `pod install` 拉 `WebRTC.xcframework`（数百 MB），
+    `macos-latest` runner 自带 CocoaPods，**workflow 不需要加任何 pod 步骤**；只是首次构建慢。
+  - Linux：插件在 CMake 配置阶段从 `github.com/webrtc-sdk/libwebrtc/releases` 下载预编译
+    `libwebrtc.m150.7871.07`（zip，数百 MB）解到 `third_party/`，需要 runner 能出网；
+    `libpulse` dev 头可选（没有只是禁掉系统音频环回，不影响收流）。
+    建议给 CI 加缓存目录：`~/.pub-cache`（已有）以外的 `third_party` 不好缓存，就近缓存整个
+    `client-flutter/build/linux` 更快。
+  - Android：插件 `compileSdk 36 / minSdk 21`，与模板一致，gradle 侧无需改；
+    打包体积会 +~15–20 MB（libwebrtc .so）。
+  - Ubuntu 的 `flutter-verify` job（`pub get`→`analyze`→`test`）不受影响，不跑原生构建，
+    仍是几十秒级。
 - `window_manager` 只声明 macOS/Windows/Linux 平台，Android/iOS 上不注册，代码里已用 `Platform.is*`
   保护，`build apk` 不受影响。
-- `flutter test` 目前只有协议单测（10 项），没有 widget/集成测试（需要真机或模拟器）。
+- `flutter test` 现在 22 项：协议解析（`hello`/`device.list`/信令地址/输入/帧头）+ ICE 转换与
+  `rtc.offer`/`rtc.ice` 载荷（`test/rtc_signaling_test.dart`）+ UI 组件；仍没有 widget/集成测试
+  （需要真机或模拟器，且 WebRTC 必须有 Agent 在对面）。

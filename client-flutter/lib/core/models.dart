@@ -122,16 +122,19 @@ class RoomConfig {
   final String roomToken;
   final String roomId;
 
-  /// 原样透传给 WebRTC 的 ice_servers（stun / turn），v1 仅保存不消费。
-  final List<Object?> iceServers;
+  /// 服务端下发的 ICE 配置，**原样保存**：
+  /// `{"stun": [...], "turn": [{urls, username, credential}]}`（协议 §2.1）。
+  ///
+  /// 既用于 `rtc.offer.ice` 透传，也由 `toRtcIceServers()` 转成
+  /// `createPeerConnection` 需要的数组形态。老服务端也可能给扁平数组，都兼容。
+  final Object? iceServers;
 
   factory RoomConfig.fromJson(Map<String, dynamic> json) {
-    final ice = json['ice_servers'];
     return RoomConfig(
       signalingServer: _asString(json['signaling_server']),
       roomToken: _asString(json['token']),
       roomId: _asString(json['room_id']),
-      iceServers: ice is List ? ice : const <Object?>[],
+      iceServers: json['ice_servers'],
     );
   }
 
