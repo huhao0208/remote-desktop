@@ -106,9 +106,9 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 | job | runner | 关键依赖 | 产物（artifact 名 / 大小） |
 |---|---|---|---|
 | `flutter-verify` | ubuntu-latest | `subosito/flutter-action@v2`，钉 `stable / 3.50.1`（Dart 3.14，pubspec 要求 sdk ≥3.13） | 无（只跑 `flutter pub get` / `analyze --fatal-infos` / `test`） |
-| `flutter-build-macos` | macos-latest (arm64) | runner 自带 Xcode + CocoaPods；工程无第三方原生插件，`macos/Runner/Release.entitlements` 已开 `com.apple.security.network.client`（沙箱内联网必需） | `uu-remote-client-flutter-macos` / `.app` 目录自动打包，约 53 MB |
-| `flutter-build-linux` | ubuntu-latest | `apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev`（Flutter Linux 桌面必需，缺 GTK 会直接 cmake 失败） | `uu-remote-client-flutter-linux` / `build/linux/x64/release/bundle` 目录，约 10 MB |
-| `flutter-build-android` | ubuntu-latest | `actions/setup-java@v4` temurin **JDK 17** + runner 自带 Android SDK（无需 setup-android） | `uu-remote-client-flutter-android` / `uu-remote-client-flutter-android.apk`，约 24 MB |
+| `flutter-build-macos` | macos-latest (arm64) | runner 自带 Xcode + CocoaPods；工程无第三方原生插件，`macos/Runner/Release.entitlements` 已开 `com.apple.security.network.client`（沙箱内联网必需） | `uu-remote-client-flutter-macos` / `uu-remote-client-flutter-macos.zip`（`ditto` 归档 .app），v0.1.1 实测 18 MB（解包 53 MB） |
+| `flutter-build-linux` | ubuntu-latest | `apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev`（Flutter Linux 桌面必需，缺 GTK 会直接 cmake 失败） | `uu-remote-client-flutter-linux` / `uu-remote-client-flutter-linux.tar.gz`（tar 保住可执行位），v0.1.1 实测 10 MB |
+| `flutter-build-android` | ubuntu-latest | `actions/setup-java@v4` temurin **JDK 17** + runner 自带 Android SDK（无需 setup-android） | `uu-remote-client-flutter-android` / `uu-remote-client-flutter-android.apk`，v0.1.1 实测 51 MB |
 
 已知限制：
 
@@ -131,9 +131,12 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 
 ## 9. Release 资产清单
 
-以 tag `v0.1.1` 为准（run `44749306740`，14 个 job 全绿）。体积取自 v0.1.1 Release
-页实测值，四舍五入到 MB。`v0.1.0` 已标记为 **pre-release**，它的 `uu_remote` 是个
-23 KB 的假文件、Linux 桌面包还缺失，只作历史保留，**不要下载**。
+**发布范围（v0.1.2 起）**：客户端只有 Flutter 一套，加上服务端/被控端包，共 **8 个资产**。
+Electron 桌面端与 Capacitor 安卓/iOS 产物已停止发布，见 §9.3（v0.1.1 里还能下到，只作历史保留）。
+
+体积取自 v0.1.1 Release 实测值，四舍五入到 MB；v0.1.2 重新打包后以 Release 页数字为准。
+`v0.1.0` 已标记为 **pre-release**，它的 `uu_remote` 是个 23 KB 的假文件、Linux 桌面包还缺失，
+只作历史保留，**不要下载**。
 
 > 仓库当前是 **private**，直接 `curl` 资产链接会 404（返回 `Not Found`），
 > 必须用 `gh release download v0.1.1 -R huhao0208/remote-desktop` 或浏览器登录后点。
@@ -155,33 +158,38 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 服务端二进制**不含证书**：自己把 TLS 证书放到 `server/certs/fullchain.pem`、
 `privkey.pem`，否则 `uu-server` 起不来（或走 Docker Compose 挂载）。
 
-### 9.2 桌面控制端（Electron，内置被控端 Agent）
+### 9.2 控制端（Flutter，唯一发布的客户端）
 
-装上即用、内置默认服务器地址，是**功能最全**的控制端（H.264/WebRTC 直连 + 输入控制）。
-
-| 资产 | 体积 | 给谁用 |
-|---|---|---|
-| `uu-remote-client-win-x64.exe` | 148 MB | Windows 安装包（NSIS，双击装） |
-| `uu-remote-client-mac-arm64.dmg` | 147 MB | Apple Silicon Mac 拖入「应用程序」 |
-| `uu-remote-client-mac-arm64.zip` | 143 MB | 同上，不想走 dmg 时用（解压即 App） |
-| `uu-remote-client-mac-x64.dmg` | 151 MB | Intel Mac |
-| `uu-remote-client-mac-x64.zip` | 148 MB | Intel Mac 的 zip 形态 |
-| `uu-remote-client-linux-x86_64.AppImage` | 204 MB | Linux 桌面，`chmod +x` 后直接运行 |
-| `uu-remote-client-android.apk` | 3.8 MB | 安卓手机控制端（Capacitor 壳 + H5 控制页，轻量） |
-| `uu-remote-client-ios-project.zip` | 217 KB | iPhone 用：**只是 Xcode 工程**，需自己签名出 ipa（见包内 `ios-README.txt`） |
-
-### 9.3 Flutter 控制端（新 UI，功能子集）
-
-官方浅色风界面的重写版，桌面/移动同一套代码。**媒体通路目前只有 JPEG 兜底**，
-见 §9.4 第 5 条。
+官方浅色风界面，桌面/移动同一套代码、装上即用（内置默认服务器地址）。
+体积取自 v0.1.1：macOS 包是 **53 MB 解包 / 18 MB zip**，冷启约 0.7 s。
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-client-flutter-macos.zip` | 18 MB | macOS 桌面版；解压得 `uu_remote.app`（未签名，右键「打开」） |
-| `uu-remote-client-flutter-linux.tar.gz` | 10 MB | Linux 桌面版；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
-| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓版（debug key 签名，可装不可上架） |
+| `uu-remote-client-flutter-macos.zip` | 18 MB（解包 53 MB） | Apple Silicon macOS；解压得 `uu_remote.app`（未签名，右键「打开」） |
+| `uu-remote-client-flutter-linux.tar.gz` | 10 MB | Linux 桌面；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
+| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓手机（debug key 签名，可装不可上架） |
 
-这两个桌面包在 v0.1.0 里是坏的（macOS 变成 23 KB 的 `uu_remote`、Linux 整个丢失），
+**Windows 与 iOS 没有 Flutter 桌面/移动包**：Windows 用户请用 H5 控制页
+（`https://<host>:8443/control`）或 v0.1.1 里的 Electron 版；iOS 用户用 Safari 开 H5 控制页。
+媒体通路见 §9.4 第 5 条。
+
+### 9.3 已废弃，不再发布（Electron / Capacitor）
+
+`desktop-client`、`android-apk`、`ios-project` 三个 CI job 已加 `if: false` 留档，
+不再进 `release.needs`，因此 **v0.1.2 起的 Release 里不会再有下面这些包**。
+需要老版本请到 `v0.1.1` 下载（仍可安装使用，但不再修复）。
+
+| 旧资产 | 体积 | 原来给谁用 | 被谁取代 |
+|---|---|---|---|
+| `uu-remote-client-win-x64.exe` | 148 MB | Windows 安装包（Electron） | 无 Flutter 版 → 用 H5 控制页 |
+| `uu-remote-client-mac-arm64.dmg` / `.zip` | 147 / 143 MB | Apple Silicon Mac（Electron） | Flutter macOS zip |
+| `uu-remote-client-mac-x64.dmg` / `.zip` | 151 / 148 MB | Intel Mac（Electron） | 无 Flutter x64 包 → 暂留 v0.1.1 |
+| `uu-remote-client-linux-x86_64.AppImage` | 204 MB | Linux 桌面（Electron） | Flutter Linux tar.gz |
+| `uu-remote-client-android.apk` | 3.8 MB | 安卓（Capacitor 壳） | Flutter 安卓 apk |
+| `uu-remote-client-ios-project.zip` | 217 KB | iPhone（Capacitor Xcode 工程） | 无（iOS 走 H5 / 自行构建 Flutter iOS） |
+
+Electron 版的差别：它内置被控端 Agent、开箱即有 H.264；Flutter 版当前媒体通路见 §9.4。
+v0.1.0 的 macOS/Linux Flutter 包是坏的（macOS 变成 23 KB 的 `uu_remote`、Linux 整个丢失），
 根因见 §10。
 
 ### 9.4 已知限制（下载前先看）
@@ -189,16 +197,16 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 1. **全部 macOS 产物未签名 / 未公证**：首次打开会被 Gatekeeper 拦。右键 →「打开」，
    或 `xattr -dr com.apple.quarantine /Applications/uu_remote.app`。正式分发需
    Developer ID 证书 + `notarytool`。
-2. **全部 Windows 产物未签名**：SmartScreen 会提示「未知发布者」，需「更多信息 → 仍要运行」。
-3. **两个安卓 APK 都是 debug key 签名**（Electron/Capacitor 版 3.8 MB、Flutter 版 51 MB）：
+2. **Windows 没有发布包**：Electron 版已废弃，Flutter 也没出 Windows 构建；
+   Windows 控制端请用浏览器开 `https://<host>:8443/control`（H5 控制页）。
+3. **安卓 APK 是 debug key 签名**（Flutter 版 51 MB）：
    能装能跑，**不能上架应用商店**；上架需补 `key.properties` + `signingConfigs`。
-4. **iOS 只有工程没有 ipa**：需要 Mac + Xcode + 自己的 Apple ID 签名，
-   免费账号 7 天过期。
-5. **Flutter 版尚无 WebRTC**：`lib/media/webrtc_transport.dart` 还没接进 `remote_page`，
-   连上后一律回落 JPEG（界面会提示「H.264 通路尚未接入」）。要用 H.264 低延迟请下
-   §9.2 的 Electron 版。
-6. **Linux Flutter 包绑定 runner 的 glibc**（ubuntu-latest，2.39+），老发行版跑不起来；
-   `.AppImage` 若报 FUSE 错，用 `--appimage-extract-and-run`。
+4. **iOS 没有发布产物**：Capacitor 工程已废弃，Flutter iOS 需要 Mac + Xcode 自行构建并
+   签名（免费 Apple ID 7 天过期）；临时用 iPhone Safari 开 H5 控制页。
+5. **Flutter 版 WebRTC 状态以实际为准**：H.264 通路正在接入（`flutter-webrtc` 负责），
+   接入前一律回落 JPEG（界面会提示「H.264 通路尚未接入」）。v0.1.2 Release notes 会写明
+   该版本的实测状态，不要只看文档描述。
+6. **Linux Flutter 包绑定 runner 的 glibc**（ubuntu-latest，2.39+），老发行版跑不起来。
 7. 服务端二进制需自备 TLS 证书（见 §9.1 末尾）。
 
 ## 10. v0.1.0 打包事故复盘（目录被当文件上传）
