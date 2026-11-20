@@ -128,3 +128,89 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 - **aiortc 私有字段**（`_H264Encoder__target_bitrate`）在 `webrtc_media.py` 里被直接赋值，
   升级 aiortc 需复核；这属于运行时代码，与打包无关，但升级时要一起看。
 - `-onefile` 冷启动 5 s 左右（解压 50 MB）；如需秒开改 `--onedir`，会牵动客户端 `extraResources` 结构。
+
+## 9. Release 资产清单
+
+以 tag `v0.1.1` 为准（`v0.1.0` 的 `uu_remote` 是个 23 KB 的假文件，已标记为
+pre-release，只作历史保留，**不要下载**）。体积为 `v0.1.0` 实测值四舍五入，
+除两个 Flutter 桌面包外 v0.1.1 与之一致。
+
+### 9.1 服务端 + 被控端（同一份包内含 `uu-server` 与 `uu-agent`）
+
+装服务端的那台机器（VPS/局域网主机）和被控的电脑各取所需，包里 `server/`、`client/`
+两个目录，`START.md` 写了启动命令。
+
+| 资产 | 体积 | 给谁用 |
+|---|---|---|
+| `uu-remote-windows-x64.zip` | 84 MB | Windows 做服务端或被控端（`uu-server.exe` / `uu-agent.exe`） |
+| `uu-remote-macos-arm64.tar.gz` | 66 MB | Apple Silicon Mac（M 系列）；CI 只产出 arm64，Intel Mac 需自行 `pyinstaller`（见 §2） |
+| `uu-remote-linux-x64.tar.gz` | 138 MB | Linux VPS / NAS 免 Docker 部署（也含被控端） |
+| `uu-remote-android-termux.tar.gz` | 40 KB | 安卓手机 Termux 里直接跑源码（无预编译二进制，需 `pip install`） |
+| `uu-remote-universal.tar.gz` | 55 KB | 任意平台源码包（Python 3.10+），排查问题/改代码用 |
+
+服务端二进制**不含证书**：自己把 TLS 证书放到 `server/certs/fullchain.pem`、
+`privkey.pem`，否则 `uu-server` 起不来（或走 Docker Compose 挂载）。
+
+### 9.2 桌面控制端（Electron，内置被控端 Agent）
+
+装上即用、内置默认服务器地址，是**功能最全**的控制端（H.264/WebRTC 直连 + 输入控制）。
+
+| 资产 | 体积 | 给谁用 |
+|---|---|---|
+| `uu-remote-client-win-x64.exe` | 148 MB | Windows 安装包（NSIS，双击装） |
+| `uu-remote-client-mac-arm64.dmg` | 147 MB | Apple Silicon Mac 拖入「应用程序」 |
+| `uu-remote-client-mac-arm64.zip` | 143 MB | 同上，不想走 dmg 时用（解压即 App） |
+| `uu-remote-client-mac-x64.dmg` | 151 MB | Intel Mac |
+| `uu-remote-client-mac-x64.zip` | 148 MB | Intel Mac 的 zip 形态 |
+| `uu-remote-client-linux-x86_64.AppImage` | 204 MB | Linux 桌面，`chmod +x` 后直接运行 |
+| `uu-remote-client-android.apk` | 3.8 MB | 安卓手机控制端（Capacitor 壳 + H5 控制页，轻量） |
+| `uu-remote-client-ios-project.zip` | 217 KB | iPhone 用：**只是 Xcode 工程**，需自己签名出 ipa（见包内 `ios-README.txt`） |
+
+### 9.3 Flutter 控制端（新 UI，功能子集）
+
+官方浅色风界面的重写版，桌面/移动同一套代码。**媒体通路目前只有 JPEG 兜底**，
+见 §9.4 第 5 条。
+
+| 资产 | 体积 | 给谁用 |
+|---|---|---|
+| `uu-remote-client-flutter-macos.zip` | 17 MB | macOS 桌面版；解压得 `uu_remote.app`（未签名，右键「打开」） |
+| `uu-remote-client-flutter-linux.tar.gz` | 9.6 MB | Linux 桌面版；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
+| `uu-remote-client-flutter-android.apk` | 51 MB | 安卓版（debug key 签名，可装不可上架） |
+
+这两个桌面包在 v0.1.0 里是坏的（macOS 变成 23 KB 的 `uu_remote`、Linux 整个丢失），
+根因见 §10。
+
+### 9.4 已知限制（下载前先看）
+
+1. **全部 macOS 产物未签名 / 未公证**：首次打开会被 Gatekeeper 拦。右键 →「打开」，
+   或 `xattr -dr com.apple.quarantine /Applications/uu_remote.app`。正式分发需
+   Developer ID 证书 + `notarytool`。
+2. **全部 Windows 产物未签名**：SmartScreen 会提示「未知发布者」，需「更多信息 → 仍要运行」。
+3. **两个安卓 APK 都是 debug key 签名**（Electron/Capacitor 版 3.8 MB、Flutter 版 51 MB）：
+   能装能跑，**不能上架应用商店**；上架需补 `key.properties` + `signingConfigs`。
+4. **iOS 只有工程没有 ipa**：需要 Mac + Xcode + 自己的 Apple ID 签名，
+   免费账号 7 天过期。
+5. **Flutter 版尚无 WebRTC**：`lib/media/webrtc_transport.dart` 还没接进 `remote_page`，
+   连上后一律回落 JPEG（界面会提示「H.264 通路尚未接入」）。要用 H.264 低延迟请下
+   §9.2 的 Electron 版。
+6. **Linux Flutter 包绑定 runner 的 glibc**（ubuntu-latest，2.39+），老发行版跑不起来；
+   `.AppImage` 若报 FUSE 错，用 `--appimage-extract-and-run`。
+7. 服务端二进制需自备 TLS 证书（见 §9.1 末尾）。
+
+## 10. v0.1.0 打包事故复盘（目录被当文件上传）
+
+**现象**：v0.1.0 Release 里有一个 23 KB 的 `uu_remote`，下载后解不出 App；
+同时 `uu-remote-client-flutter-linux` 整个不见了。
+
+**根因**：`flutter-build-macos` 的 `upload-artifact` 路径是
+`.../Release/*.app`（目录），`flutter-build-linux` 是 `.../release/bundle`（目录）。
+`release` job 用 `download-artifact` 的 `merge-multiple: true` 把所有 artifact
+展平到同一目录，目录条目无法作为「一个文件」存在 →
+macOS 那个退化成单个残留条目被 `action-gh-release` 当文件发出，Linux 那个被拆散。
+
+**修法**：两个 job 都先在本地归档再上传单个文件
+（macOS `ditto -c -k --sequesterRsrc --keepParent` → `.zip`；
+Linux `tar -czf` → `.tar.gz`，tar 保住可执行位）。
+
+**教训**：凡是要进 Release 的产物，`upload-artifact` 的 `path` 必须是
+**文件或通配到文件**，绝不能让目录参与 `merge-multiple` 的合并。

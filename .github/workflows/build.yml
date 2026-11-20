@@ -358,13 +358,14 @@ jobs:
       - name: Package .app into zip
         run: |
           set -euo pipefail
-          APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | head -n 1)"
+          APP_PATH="$(ls -d build/macos/Build/Products/Release/*.app | sed -n '1p')"
           echo "packaging: $APP_PATH"
           # 产物落在仓库根，路径与其它 job 的资产名保持一致，release job 直接 artifacts/* 收走
           ditto -c -k --sequesterRsrc --keepParent \
             "$APP_PATH" "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
-          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" | head -n 5
+          # 用 sed 不用 head：head 读够就关管道 → 上游 SIGPIPE，配 pipefail 会误判失败
+          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" | sed -n '1,6p'
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-macos
@@ -398,7 +399,8 @@ jobs:
           tar -czf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" \
             -C build/linux/x64/release bundle
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz"
-          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" | head -n 5
+          # 同上：不能 head，SIGPIPE 会让 tar 返回错误码
+          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" | sed -n '1,5p'
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-flutter-linux
