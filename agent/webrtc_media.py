@@ -242,16 +242,17 @@ class ScreenTrack(VideoStreamTrack):
         return frame
 
     def _blank(self) -> Image.Image:
-        """按显示器尺寸生成占位帧（缓存），避免 640×360 ↔ 1920×1200 反复切分辨率。"""
-        if getattr(self, "_blank_img", None) is not None:
-            return self._blank_img
+        """按显示器/目标宽度生成占位帧（缓存），避免 640×360 ↔ 1920×1200 反复切分辨率。"""
         mons = list_monitors()
         w, h = 640, 360
         if self.monitor < len(mons):
             m = mons[self.monitor]
             w = min(self.max_width, m["width"])
             h = max(2, int(m["height"] * w / m["width"] / 2) * 2)
-        self._blank_img = Image.new("RGB", (w - w % 2, h), (18, 18, 20))
+        key = (w - w % 2, h)
+        if getattr(self, "_blank_key", None) != key:  # stream.config 改了宽度要跟着重建
+            self._blank_img = Image.new("RGB", key, (18, 18, 20))
+            self._blank_key = key
         return self._blank_img
 
 
@@ -344,6 +345,7 @@ class MicTrack(AudioStreamTrack):
             with self._lock:
                 self._chunks.clear()
                 self._bytes = 0
+            self.dropped = 0  # 这段预滚数据是主动丢弃的，不计入「运行期丢块」
         need = self.SAMPLES * 2
         if self._stream is None:
             await asyncio.sleep(0.02)  # 无设备时仍按实时节奏出静音
