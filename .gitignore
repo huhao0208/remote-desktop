@@ -1,0 +1,44 @@
+# 证书与私钥：绝不入库（部署时单独放到 srv2/certs/）
+*.pem
+*.key
+*.crt
+*.p12
+certs/
+proxy/confdir/
+
+# 逆向产物与客户端安装包：体积大且有版权风险，不入库
+*.apk
+*.exe
+apk-dec/
+jadx-out/
+pc_extract/
+srv/
+uuyc.apk
+uu_setup.exe
+
+# 凭据与运行数据
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+capture/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+proxy/venv/
+
+# 临时日志
+*.log
+/tmp/
+# 逆向抓包与官方页面快照（可能含会话标识 / 官方素材）
+headers.txt
+*.html
+pc.json
+lib/

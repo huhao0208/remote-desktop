@@ -1,0 +1,1968 @@
+{
+  "com.remote.app.api.ScreensaverData.PresetItem": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "preset_id",
+        "optional": false
+      },
+      {
+        "name": "locales",
+        "optional": false
+      }
+    ],
+    "source": "K8/x.java"
+  },
+  "com.remote.app.api.ScreensaverData.Locale": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "image",
+        "optional": false
+      }
+    ],
+    "source": "K8/r.java"
+  },
+  "com.remote.app.api.ScreensaverData": {
+    "field_count": 6,
+    "fields": [
+      {
+        "name": "selected_type",
+        "optional": false
+      },
+      {
+        "name": "selected_preset_id",
+        "optional": true
+      },
+      {
+        "name": "selected_index",
+        "optional": true
+      },
+      {
+        "name": "selected_image_url",
+        "optional": true
+      },
+      {
+        "name": "custom_image",
+        "optional": true
+      },
+      {
+        "name": "preset_config",
+        "optional": true
+      }
+    ],
+    "source": "K8/m.java"
+  },
+  "com.remote.app.api.AssistFavoriteInput": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "connect_id",
+        "optional": false
+      },
+      {
+        "name": "remark",
+        "optional": true
+      },
+      {
+        "name": "favorited_at",
+        "optional": false
+      }
+    ],
+    "source": "K8/h.java"
+  },
+  "com.remote.app.api.AssistDeviceRecord": {
+    "field_count": 7,
+    "fields": [
+      {
+        "name": "publisher_device_id",
+        "optional": false
+      },
+      {
+        "name": "connect_id",
+        "optional": false
+      },
+      {
+        "name": "platform",
+        "optional": true
+      },
+      {
+        "name": "remark",
+        "optional": true
+      },
+      {
+        "name": "is_favorite",
+        "optional": true
+      },
+      {
+        "name": "last_connected_at",
+        "optional": true
+      },
+      {
+        "name": "favorited_at",
+        "optional": true
+      }
+    ],
+    "source": "K8/C0645a.java"
+  },
+  "com.remote.app.api.ShouldPopReviewReportDialog.Resp": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "next_query_time",
+        "optional": false
+      },
+      {
+        "name": "should_pop_windows",
+        "optional": false
+      },
+      {
+        "name": "deep_link",
+        "optional": true
+      }
+    ],
+    "source": "K8/B.java"
+  },
+  "com.remote.app.api.AssistDeviceRecordPage": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "saved",
+        "optional": true
+      },
+      {
+        "name": "next",
+        "optional": true
+      }
+    ],
+    "source": "K8/C0648d.java"
+  },
+  "com.remote.app.api.ScreensaverData.Locales": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "default",
+        "optional": false
+      }
+    ],
+    "source": "K8/u.java"
+  },
+  "com.remote.app.api.ScreensaverData.Image": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "url",
+        "optional": false
+      },
+      {
+        "name": "md5",
+        "optional": true
+      }
+    ],
+    "source": "K8/o.java"
+  },
+  "com.remote.app.ui.adapter.DeviceItem": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "device_name",
+        "optional": false
+      },
+      {
+        "name": "device_code",
+        "optional": true
+      }
+    ],
+    "source": "h9/C2319a.java"
+  },
+  "com.remote.virtual_key.model.FullKeyboardStandardParam": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "standardKeyWidth",
+        "optional": false
+      },
+      {
+        "name": "standardKeyHeight",
+        "optional": false
+      },
+      {
+        "name": "standardStartMargin",
+        "optional": false
+      },
+      {
+        "name": "standardTopMargin",
+        "optional": false
+      }
+    ],
+    "source": "Lc/w.java"
+  },
+  "com.remote.virtual_key.model.FullKeyboardRow": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "keyItemList",
+        "optional": false
+      },
+      {
+        "name": "topMargin",
+        "optional": false
+      },
+      {
+        "name": "height",
+        "optional": false
+      }
+    ],
+    "source": "Lc/t.java"
+  },
+  "com.remote.virtual_key.model.FullKeyboardItem": {
+    "field_count": 7,
+    "fields": [
+      {
+        "name": "keyCode",
+        "optional": false
+      },
+      {
+        "name": "displayName",
+        "optional": false
+      },
+      {
+        "name": "shiftDisplayName",
+        "optional": true
+      },
+      {
+        "name": "startMargin",
+        "optional": true
+      },
+      {
+        "name": "endMargin",
+        "optional": true
+      },
+      {
+        "name": "width",
+        "optional": false
+      },
+      {
+        "name": "isModifier",
+        "optional": true
+      }
+    ],
+    "source": "Lc/C0659g.java"
+  },
+  "com.remote.virtual_key.model.FullKeyboardConfig": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "keyRowList",
+        "optional": false
+      },
+      {
+        "name": "standardParam",
+        "optional": false
+      }
+    ],
+    "source": "Lc/C0656d.java"
+  },
+  "com.remote.account.model.RegionCode": {
+    "field_count": 5,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "name_cn",
+        "optional": true
+      },
+      {
+        "name": "name_en",
+        "optional": true
+      },
+      {
+        "name": "first_pinyin",
+        "optional": true
+      },
+      {
+        "name": "is_hot",
+        "optional": true
+      }
+    ],
+    "source": "B8/r.java"
+  },
+  "com.remote.account.model.QrCodeData": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "qrcode_jump_url",
+        "optional": false
+      },
+      {
+        "name": "token",
+        "optional": false
+      }
+    ],
+    "source": "B8/b.java"
+  },
+  "com.remote.account.model.QrLoginStatusResp": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "login_status",
+        "optional": false
+      }
+    ],
+    "source": "B8/o.java"
+  },
+  "com.remote.perf.api.model.ProcessRecord": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "process_name",
+        "optional": false
+      },
+      {
+        "name": "update_timestamp",
+        "optional": false
+      },
+      {
+        "name": "client_version",
+        "optional": false
+      }
+    ],
+    "source": "rb/C3269a.java"
+  },
+  "com.remote.vkplan.model.GetVKOfficialPlansResp": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "version",
+        "optional": false
+      },
+      {
+        "name": "keymapping",
+        "optional": true
+      }
+    ],
+    "source": "bd/C1332a.java"
+  },
+  "com.remote.vkplan.model.UploadVKPlanReq": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "keymapping_type",
+        "optional": false
+      },
+      {
+        "name": "focused_win_info",
+        "optional": false
+      },
+      {
+        "name": "url",
+        "optional": false
+      }
+    ],
+    "source": "bd/g.java"
+  },
+  "com.remote.vkplan.model.VKOfficialPlanIndex": {
+    "field_count": 7,
+    "fields": [
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "url",
+        "optional": false
+      },
+      {
+        "name": "preview_img_url",
+        "optional": false
+      },
+      {
+        "name": "keymapping_type",
+        "optional": false
+      },
+      {
+        "name": "id",
+        "optional": false
+      },
+      {
+        "name": "updated_at",
+        "optional": false
+      },
+      {
+        "name": "is_recommend",
+        "optional": false
+      }
+    ],
+    "source": "bd/j.java"
+  },
+  "com.remote.vkplan.model.UpdateVKPlanReq": {
+    "field_count": 5,
+    "fields": [
+      {
+        "name": "id",
+        "optional": false
+      },
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "keymapping_type",
+        "optional": false
+      },
+      {
+        "name": "focused_win_info",
+        "optional": false
+      },
+      {
+        "name": "url",
+        "optional": false
+      }
+    ],
+    "source": "bd/C1335d.java"
+  },
+  "com.remote.provider.model.DeviceAbilityConfig": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "feature",
+        "optional": false
+      },
+      {
+        "name": "original_version",
+        "optional": false
+      },
+      {
+        "name": "final_version",
+        "optional": false
+      }
+    ],
+    "source": "Ib/c.java"
+  },
+  "com.remote.upgrade.api.model.FeaturePopupData": {
+    "field_count": 8,
+    "fields": [
+      {
+        "name": "enable",
+        "optional": true
+      },
+      {
+        "name": "title",
+        "optional": true
+      },
+      {
+        "name": "btn_text",
+        "optional": true
+      },
+      {
+        "name": "intro_link",
+        "optional": true
+      },
+      {
+        "name": "img_url",
+        "optional": true
+      },
+      {
+        "name": "primary_btn_text",
+        "optional": true
+      },
+      {
+        "name": "primary_intro_link",
+        "optional": true
+      }
+    ],
+    "source": "Cc/a.java"
+  },
+  "com.remote.upgrade.api.model.ForceUpdateInfo.UpgradeUri": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "intents",
+        "optional": true
+      }
+    ],
+    "source": "Cc/h.java"
+  },
+  "com.remote.upgrade.api.model.ForceUpdateInfo.UpgradeUri.Intent": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "deeplink",
+        "optional": true
+      },
+      {
+        "name": "package",
+        "optional": true
+      }
+    ],
+    "source": "Cc/j.java"
+  },
+  "com.remote.upgrade.api.model.ForceUpdateInfo": {
+    "field_count": 8,
+    "fields": [
+      {
+        "name": "url",
+        "optional": false
+      },
+      {
+        "name": "md5",
+        "optional": false
+      },
+      {
+        "name": "version_name",
+        "optional": false
+      },
+      {
+        "name": "version_code",
+        "optional": false
+      },
+      {
+        "name": "change_logs",
+        "optional": true
+      },
+      {
+        "name": "user_external_force_upgrade",
+        "optional": true
+      },
+      {
+        "name": "upgrade_uri",
+        "optional": true
+      }
+    ],
+    "source": "Cc/d.java"
+  },
+  "com.remote.basic.json.EmptyData": {
+    "field_count": 0,
+    "fields": [],
+    "source": "J9/c.java"
+  },
+  "Client_UNSPECIFIED": {
+    "field_count": 0,
+    "fields": [],
+    "source": "Bb/U.java"
+  },
+  "Client_IOS": {
+    "field_count": 1,
+    "fields": [],
+    "source": "Bb/U.java"
+  },
+  "Client_ANDROID": {
+    "field_count": 2,
+    "fields": [],
+    "source": "Bb/U.java"
+  },
+  "Client_WINDOWS": {
+    "field_count": 3,
+    "fields": [],
+    "source": "Bb/U.java"
+  },
+  "Client_MAC": {
+    "field_count": 4,
+    "fields": [],
+    "source": "Bb/U.java"
+  },
+  "com.remote.app.deeplink.DeviceAuthorizeRequest": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "callback",
+        "optional": false
+      },
+      {
+        "name": "nonce",
+        "optional": true
+      }
+    ],
+    "source": "P8/e.java"
+  },
+  "com.remote.app.deeplink.FeedbackParam": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "page",
+        "optional": false
+      }
+    ],
+    "source": "P8/v.java"
+  },
+  "com.remote.app.deeplink.DeviceDetailParam": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "deviceId",
+        "optional": false
+      },
+      {
+        "name": "autoLaunch",
+        "optional": true
+      },
+      {
+        "name": "launchGameId",
+        "optional": true
+      }
+    ],
+    "source": "P8/n.java"
+  },
+  "com.remote.app.deeplink.DeviceControlRequest": {
+    "field_count": 5,
+    "fields": [
+      {
+        "name": "deviceId",
+        "optional": false
+      },
+      {
+        "name": "callback",
+        "optional": true
+      },
+      {
+        "name": "floatWindow",
+        "optional": true
+      },
+      {
+        "name": "source",
+        "optional": true
+      }
+    ],
+    "source": "P8/k.java"
+  },
+  "com.remote.app.deeplink.StarterParam": {
+    "field_count": 5,
+    "fields": [
+      {
+        "name": "deviceId",
+        "optional": false
+      },
+      {
+        "name": "source",
+        "optional": false
+      },
+      {
+        "name": "floatWindow",
+        "optional": true
+      },
+      {
+        "name": "externalDeeplinkCallback",
+        "optional": true
+      }
+    ],
+    "source": "P8/A.java"
+  },
+  "com.remote.app.deeplink.CloudDiskManageParam": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "diskId",
+        "optional": false
+      }
+    ],
+    "source": "P8/C0732b.java"
+  },
+  "com.remote.proto.MuMuMetrics": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "installed",
+        "optional": true
+      },
+      {
+        "name": "support_control",
+        "optional": true
+      }
+    ],
+    "source": "Ab/f.java"
+  },
+  "com.remote.web.bridge.model.UUYCContract": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "method",
+        "optional": false
+      }
+    ],
+    "source": "gd/C2286a.java"
+  },
+  "com.remote.store.model.CustomShortcutKey": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "keyName",
+        "optional": false
+      },
+      {
+        "name": "keyAlias",
+        "optional": false
+      },
+      {
+        "name": "level",
+        "optional": false
+      },
+      {
+        "name": "extraJson",
+        "optional": true
+      }
+    ],
+    "source": "sc/C3378a.java"
+  },
+  "com.remote.store.model.RemoteConfigStore": {
+    "field_count": 26,
+    "fields": [
+      {
+        "name": "remote_device_id",
+        "optional": false
+      },
+      {
+        "name": "remote_type",
+        "optional": false
+      },
+      {
+        "name": "screen_fps",
+        "optional": true
+      },
+      {
+        "name": "screen_quality",
+        "optional": true
+      },
+      {
+        "name": "screen_quality_type",
+        "optional": true
+      },
+      {
+        "name": "custom_bitrate",
+        "optional": true
+      },
+      {
+        "name": "screen_config_resolution",
+        "optional": true
+      },
+      {
+        "name": "remote_device_safety_config",
+        "optional": true
+      },
+      {
+        "name": "remote_device_app_list",
+        "optional": true
+      },
+      {
+        "name": "pinned_device_app_list",
+        "optional": true
+      },
+      {
+        "name": "pinned_device_apps",
+        "optional": true
+      },
+      {
+        "name": "remote_keep_mute",
+        "optional": true
+      },
+      {
+        "name": "remote_mute_temporary",
+        "optional": true
+      },
+      {
+        "name": "remote_auto_lock_screen",
+        "optional": true
+      },
+      {
+        "name": "clipboard_send_show_prompts",
+        "optional": true
+      },
+      {
+        "name": "clipboard_sync",
+        "optional": true
+      },
+      {
+        "name": "ignore_wol_tips",
+        "optional": true
+      },
+      {
+        "name": "show_microphone_switch",
+        "optional": true
+      },
+      {
+        "name": "enable_microphone_switch",
+        "optional": true
+      },
+      {
+        "name": "auto_enter_float_window",
+        "optional": true
+      },
+      {
+        "name": "show_float_window_switch",
+        "optional": true
+      },
+      {
+        "name": "privacy_not_set_tip_can_show",
+        "optional": true
+      },
+      {
+        "name": "privacy_not_set_tip_disabled",
+        "optional": true
+      },
+      {
+        "name": "auto_unlock_hint_shown",
+        "optional": true
+      },
+      {
+        "name": "international_connect_purchase_shown",
+        "optional": true
+      },
+      {
+        "name": "tool_sequence",
+        "optional": true
+      }
+    ],
+    "source": "sc/C3381d.java"
+  },
+  "com.remote.store.model.ScreenConfigResolution": {
+    "field_count": 5,
+    "fields": [
+      {
+        "name": "resolution_type",
+        "optional": false
+      },
+      {
+        "name": "screen_width",
+        "optional": false
+      },
+      {
+        "name": "screen_height",
+        "optional": false
+      },
+      {
+        "name": "pixel_width",
+        "optional": true
+      },
+      {
+        "name": "pixel_height",
+        "optional": true
+      }
+    ],
+    "source": "sc/C3384g.java"
+  },
+  "com.remote.upgrade.http.NewVersionPopupResp": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "popups",
+        "optional": false
+      }
+    ],
+    "source": "Ec/b.java"
+  },
+  "com.remote.device.model.ControlInfoApp": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "app_id",
+        "optional": true
+      },
+      {
+        "name": "control_config",
+        "optional": true
+      }
+    ],
+    "source": "ga/C2279g.java"
+  },
+  "com.remote.device.model.DeviceInitData": {
+    "field_count": 17,
+    "fields": [
+      {
+        "name": "name",
+        "optional": true
+      },
+      {
+        "name": "client_id",
+        "optional": true
+      },
+      {
+        "name": "system_id",
+        "optional": true
+      },
+      {
+        "name": "system_version",
+        "optional": true
+      },
+      {
+        "name": "gaid",
+        "optional": true
+      },
+      {
+        "name": "install_id",
+        "optional": true
+      },
+      {
+        "name": "build_fingerprint",
+        "optional": true
+      },
+      {
+        "name": "manufacturer",
+        "optional": true
+      },
+      {
+        "name": "model",
+        "optional": true
+      },
+      {
+        "name": "product",
+        "optional": true
+      },
+      {
+        "name": "rom",
+        "optional": true
+      },
+      {
+        "name": "abi",
+        "optional": true
+      },
+      {
+        "name": "screen_size",
+        "optional": true
+      },
+      {
+        "name": "dpi",
+        "optional": true
+      },
+      {
+        "name": "controllable",
+        "optional": true
+      }
+    ],
+    "source": "ga/v.java"
+  },
+  "com.remote.device.model.CloudPcDevicesCache": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "timestamp",
+        "optional": false
+      },
+      {
+        "name": "devices",
+        "optional": true
+      }
+    ],
+    "source": "ga/C2273a.java"
+  },
+  "com.remote.device.model.ControlInfoUrlResp": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "_id",
+        "optional": true
+      },
+      {
+        "name": "url",
+        "optional": true
+      }
+    ],
+    "source": "ga/m.java"
+  },
+  "com.remote.device.model.ControlInfoFile": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "whitelist",
+        "optional": true
+      }
+    ],
+    "source": "ga/C2282j.java"
+  },
+  "com.remote.device.model.DeviceAppResp": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "device_app_list",
+        "optional": false
+      },
+      {
+        "name": "special_app_map",
+        "optional": true
+      }
+    ],
+    "source": "ga/s.java"
+  },
+  "com.remote.device.model.MyDevicesResp": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "current_device",
+        "optional": true
+      },
+      {
+        "name": "my_binded_devices",
+        "optional": true
+      }
+    ],
+    "source": "ga/C.java"
+  },
+  "com.remote.device.model.WakeOnLanReportData": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "inner_ip",
+        "optional": false
+      },
+      {
+        "name": "subnet_mask",
+        "optional": false
+      },
+      {
+        "name": "mac",
+        "optional": true
+      }
+    ],
+    "source": "ga/I.java"
+  },
+  "com.remote.device.model.ControllableDevicesCache": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "timestamp",
+        "optional": false
+      },
+      {
+        "name": "devices",
+        "optional": true
+      }
+    ],
+    "source": "ga/p.java"
+  },
+  "com.remote.device.model.CloudPcDevicesResp": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "devices",
+        "optional": true
+      }
+    ],
+    "source": "ga/C2276d.java"
+  },
+  "com.remote.device.model.PinnedAppResp": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "device_app_list",
+        "optional": false
+      },
+      {
+        "name": "special_app_map",
+        "optional": true
+      }
+    ],
+    "source": "ga/F.java"
+  },
+  "com.remote.message.model.MessageSummary": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "no_read_num",
+        "optional": false
+      }
+    ],
+    "source": "cb/C1652a.java"
+  },
+  "com.remote.http.FilePickerParam": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "req_url",
+        "optional": false
+      },
+      {
+        "name": "token",
+        "optional": false
+      }
+    ],
+    "source": "Ea/v.java"
+  },
+  "com.remote.http.Success": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "msg",
+        "optional": true
+      },
+      {
+        "name": "data",
+        "optional": true
+      }
+    ],
+    "source": "Ea/N.java"
+  },
+  "com.remote.http.JsonResponse": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "code",
+        "optional": false
+      },
+      {
+        "name": "msg",
+        "optional": false
+      },
+      {
+        "name": "data",
+        "optional": true
+      }
+    ],
+    "source": "Ea/E.java"
+  },
+  "com.remote.http.FPResponse": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "url",
+        "optional": true
+      }
+    ],
+    "source": "Ea/C0547n.java"
+  },
+  "com.remote.gesture.contract.key.KeyCode": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "code",
+        "optional": false
+      },
+      {
+        "name": "name",
+        "optional": false
+      }
+    ],
+    "source": "Aa/a.java"
+  },
+  "com.remote.room.api.http.TransportRpcRequestData": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "p",
+        "optional": false
+      },
+      {
+        "name": "need_response",
+        "optional": true
+      },
+      {
+        "name": "data",
+        "optional": true
+      }
+    ],
+    "source": "Qb/a.java"
+  },
+  "com.remote.sensors.strategy.TrackLimitRecord": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "date",
+        "optional": false
+      },
+      {
+        "name": "records",
+        "optional": true
+      }
+    ],
+    "source": "nc/C2830b.java"
+  },
+  "com.remote.cloud.api.GamePcSpecsResData": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "game",
+        "optional": false
+      }
+    ],
+    "source": "P9/C0739f.java"
+  },
+  "com.remote.cloud.api.GetCloudDisks.DiskInfoResp": {
+    "field_count": 10,
+    "fields": [
+      {
+        "name": "disk_id",
+        "optional": false
+      },
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "drive_letter",
+        "optional": true
+      },
+      {
+        "name": "is_expired",
+        "optional": true
+      },
+      {
+        "name": "is_about_to_expire",
+        "optional": true
+      },
+      {
+        "name": "expired_at",
+        "optional": true
+      },
+      {
+        "name": "capacity",
+        "optional": true
+      },
+      {
+        "name": "auto_renewal",
+        "optional": true
+      }
+    ],
+    "source": "P9/r.java"
+  },
+  "com.remote.cloud.api.GamePcSpecsResData.Game.RecommendPcType.PriceInfo": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "pc_type",
+        "optional": false
+      },
+      {
+        "name": "price_per_hour",
+        "optional": false
+      },
+      {
+        "name": "original_price_per_hour",
+        "optional": true
+      }
+    ],
+    "source": "P9/l.java"
+  },
+  "com.remote.cloud.api.PcGoodsResData.PcTypeGroup.PcType": {
+    "field_count": 8,
+    "fields": [
+      {
+        "name": "pc_type",
+        "optional": true
+      },
+      {
+        "name": "pc_type_name",
+        "optional": true
+      },
+      {
+        "name": "tags",
+        "optional": true
+      },
+      {
+        "name": "price_per_hour",
+        "optional": true
+      },
+      {
+        "name": "original_price_per_hour",
+        "optional": true
+      },
+      {
+        "name": "cover_url",
+        "optional": true
+      },
+      {
+        "name": "cover_tag",
+        "optional": true
+      }
+    ],
+    "source": "P9/C.java"
+  },
+  "com.remote.cloud.api.BootCloudPcDevice.BootParams": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "strategy",
+        "optional": true
+      },
+      {
+        "name": "enable_boot_when_balance_insufficient",
+        "optional": true
+      },
+      {
+        "name": "prepare_launch_app_params",
+        "optional": true
+      },
+      {
+        "name": "force_boot_without_disk",
+        "optional": true
+      }
+    ],
+    "source": "P9/C0734a.java"
+  },
+  "com.remote.cloud.api.GamePcSpecsResData.Game": {
+    "field_count": 10,
+    "fields": [
+      {
+        "name": "id",
+        "optional": false
+      },
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "short_name",
+        "optional": false
+      },
+      {
+        "name": "icon_url",
+        "optional": false
+      },
+      {
+        "name": "poster_url",
+        "optional": false
+      },
+      {
+        "name": "search_key",
+        "optional": false
+      },
+      {
+        "name": "only_display_by_search",
+        "optional": false
+      },
+      {
+        "name": "recommend_pc_types",
+        "optional": false
+      },
+      {
+        "name": "title",
+        "optional": true
+      }
+    ],
+    "source": "P9/C0741h.java"
+  },
+  "com.remote.cloud.api.GamePcSpecsResData.Game.RecommendPcType": {
+    "field_count": 8,
+    "fields": [
+      {
+        "name": "pc_type",
+        "optional": false
+      },
+      {
+        "name": "pc_type_name",
+        "optional": false
+      },
+      {
+        "name": "graphics_recommendation",
+        "optional": false
+      },
+      {
+        "name": "resolution_recommendation",
+        "optional": false
+      },
+      {
+        "name": "target_fps",
+        "optional": false
+      },
+      {
+        "name": "price_info",
+        "optional": false
+      },
+      {
+        "name": "most_recommended",
+        "optional": true
+      },
+      {
+        "name": "performance_summary",
+        "optional": true
+      }
+    ],
+    "source": "P9/j.java"
+  },
+  "com.remote.cloud.api.PcGoodsResData.PcTypeGroup": {
+    "field_count": 7,
+    "fields": [
+      {
+        "name": "name",
+        "optional": true
+      },
+      {
+        "name": "pc_type_group_code",
+        "optional": true
+      },
+      {
+        "name": "pc_type_list",
+        "optional": true
+      },
+      {
+        "name": "selectable",
+        "optional": true
+      },
+      {
+        "name": "recommend_page_title",
+        "optional": true
+      },
+      {
+        "name": "recommend_more_text",
+        "optional": true
+      },
+      {
+        "name": "recommend_search_text",
+        "optional": true
+      }
+    ],
+    "source": "P9/A.java"
+  },
+  "com.remote.cloud.api.GetCloudDisks.Response": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "disks",
+        "optional": true
+      },
+      {
+        "name": "bind_map",
+        "optional": true
+      },
+      {
+        "name": "bindable_map",
+        "optional": true
+      }
+    ],
+    "source": "P9/u.java"
+  },
+  "com.remote.cloud.api.PcGoodsResData": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "pc_type_groups",
+        "optional": false
+      }
+    ],
+    "source": "P9/y.java"
+  },
+  "com.remote.feedback.api.model.FeedbackTokenResp": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "token",
+        "optional": false
+      }
+    ],
+    "source": "la/a.java"
+  },
+  "com.remote.account.api.model.LoginHistory": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "region_code",
+        "optional": false
+      },
+      {
+        "name": "phone_number",
+        "optional": false
+      }
+    ],
+    "source": "w8/C3635a.java"
+  },
+  "com.remote.account.api.model.LoginResp": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "user_id",
+        "optional": false
+      },
+      {
+        "name": "nickname",
+        "optional": false
+      },
+      {
+        "name": "token",
+        "optional": false
+      }
+    ],
+    "source": "w8/C3638d.java"
+  },
+  "com.remote.account.api.model.QuickLoginEnabledConfig": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "isOpen",
+        "optional": true
+      }
+    ],
+    "source": "w8/C3643i.java"
+  },
+  "com.remote.account.api.model.Userinfo": {
+    "field_count": 9,
+    "fields": [
+      {
+        "name": "user_id",
+        "optional": false
+      },
+      {
+        "name": "nickname",
+        "optional": false
+      },
+      {
+        "name": "member_expired_at",
+        "optional": true
+      },
+      {
+        "name": "is_verified_realname",
+        "optional": true
+      },
+      {
+        "name": "coin_balance",
+        "optional": true
+      },
+      {
+        "name": "member_type",
+        "optional": true
+      },
+      {
+        "name": "member_display_status",
+        "optional": true
+      },
+      {
+        "name": "member_additional_desc",
+        "optional": true
+      },
+      {
+        "name": "member_trial_status",
+        "optional": true
+      }
+    ],
+    "source": "w8/p.java"
+  },
+  "com.remote.account.api.model.ScanQrcodeResp": {
+    "field_count": 6,
+    "fields": [
+      {
+        "name": "img_url",
+        "optional": false
+      },
+      {
+        "name": "text",
+        "optional": false
+      },
+      {
+        "name": "qrcode_action_ticket",
+        "optional": false
+      },
+      {
+        "name": "location_province",
+        "optional": false
+      },
+      {
+        "name": "location_city",
+        "optional": false
+      }
+    ],
+    "source": "w8/C3647m.java"
+  },
+  "com.remote.file.api.model.TransferFile": {
+    "field_count": 6,
+    "fields": [
+      {
+        "name": "name",
+        "optional": false
+      },
+      {
+        "name": "uri",
+        "optional": false
+      },
+      {
+        "name": "modify_timestamp",
+        "optional": false
+      },
+      {
+        "name": "size",
+        "optional": false
+      },
+      {
+        "name": "icon_type",
+        "optional": false
+      }
+    ],
+    "source": "sa/C3377b.java"
+  },
+  "com.remote.room.api.model.ScreenDisplayInfo": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "id",
+        "optional": false
+      },
+      {
+        "name": "fps",
+        "optional": false
+      },
+      {
+        "name": "hdr",
+        "optional": false
+      }
+    ],
+    "source": "Rb/x.java"
+  },
+  "com.remote.room.api.model.AndroidControlInfo": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "action",
+        "optional": true
+      },
+      {
+        "name": "device_info",
+        "optional": false
+      }
+    ],
+    "source": "Rb/a.java"
+  },
+  "com.remote.room.api.model.FrameQualityCapability": {
+    "field_count": 7,
+    "fields": [
+      {
+        "name": "video_codec",
+        "optional": false
+      },
+      {
+        "name": "chroma_sampling",
+        "optional": false
+      },
+      {
+        "name": "bit_depth",
+        "optional": true
+      },
+      {
+        "name": "max_frame_quality",
+        "optional": false
+      },
+      {
+        "name": "max_width",
+        "optional": false
+      },
+      {
+        "name": "max_height",
+        "optional": false
+      },
+      {
+        "name": "result",
+        "optional": false
+      }
+    ],
+    "source": "Rb/m.java"
+  },
+  "com.remote.room.api.model.RoomConfig": {
+    "field_count": 12,
+    "fields": [
+      {
+        "name": "signaling_server",
+        "optional": false
+      },
+      {
+        "name": "token",
+        "optional": false
+      },
+      {
+        "name": "signaling_list",
+        "optional": false
+      },
+      {
+        "name": "ws_connect_timeout_ms",
+        "optional": false
+      },
+      {
+        "name": "streamer_retry_delta_ms",
+        "optional": false
+      },
+      {
+        "name": "max_reconnect_delta",
+        "optional": false
+      },
+      {
+        "name": "report_token",
+        "optional": false
+      },
+      {
+        "name": "report_url",
+        "optional": false
+      },
+      {
+        "name": "report_server_address",
+        "optional": true
+      },
+      {
+        "name": "international_connect",
+        "optional": true
+      },
+      {
+        "name": "sni_required_signaling_list",
+        "optional": true
+      },
+      {
+        "name": "streamer_config",
+        "optional": true
+      }
+    ],
+    "source": "Rb/q.java"
+  },
+  "com.remote.room.api.model.ControlDeviceInfo": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "platform",
+        "optional": true
+      },
+      {
+        "name": "version_name",
+        "optional": true
+      }
+    ],
+    "source": "Rb/g.java"
+  },
+  "com.remote.room.api.model.ExitControlInfo": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "action",
+        "optional": true
+      },
+      {
+        "name": "session_id",
+        "optional": false
+      }
+    ],
+    "source": "Rb/j.java"
+  },
+  "com.remote.room.api.model.AssistRoomConfig": {
+    "field_count": 18,
+    "fields": [
+      {
+        "name": "signaling_server",
+        "optional": false
+      },
+      {
+        "name": "token",
+        "optional": false
+      },
+      {
+        "name": "signaling_list",
+        "optional": false
+      },
+      {
+        "name": "ws_connect_timeout_ms",
+        "optional": false
+      },
+      {
+        "name": "streamer_retry_delta_ms",
+        "optional": false
+      },
+      {
+        "name": "max_reconnect_delta",
+        "optional": false
+      },
+      {
+        "name": "report_token",
+        "optional": false
+      },
+      {
+        "name": "report_url",
+        "optional": false
+      },
+      {
+        "name": "report_server_address",
+        "optional": true
+      },
+      {
+        "name": "share_id",
+        "optional": true
+      },
+      {
+        "name": "device_name",
+        "optional": true
+      },
+      {
+        "name": "publisher_version_name",
+        "optional": true
+      },
+      {
+        "name": "publisher_platform",
+        "optional": false
+      },
+      {
+        "name": "publisher_device_id",
+        "optional": true
+      },
+      {
+        "name": "international_connect",
+        "optional": true
+      },
+      {
+        "name": "device_binding",
+        "optional": true
+      },
+      {
+        "name": "sni_required_signaling_list",
+        "optional": true
+      },
+      {
+        "name": "streamer_config",
+        "optional": true
+      }
+    ],
+    "source": "Rb/d.java"
+  },
+  "com.remote.terminal.protocol.ExitPayload": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "exit_code",
+        "optional": true
+      }
+    ],
+    "source": "zc/C3880d.java"
+  },
+  "com.remote.terminal.protocol.SessionInfo": {
+    "field_count": 6,
+    "fields": [
+      {
+        "name": "session_id",
+        "optional": false
+      },
+      {
+        "name": "state",
+        "optional": true
+      },
+      {
+        "name": "last_active_ms",
+        "optional": true
+      },
+      {
+        "name": "shell",
+        "optional": true
+      },
+      {
+        "name": "name",
+        "optional": true
+      },
+      {
+        "name": "created_at_ms",
+        "optional": true
+      }
+    ],
+    "source": "zc/w.java"
+  },
+  "com.remote.terminal.protocol.ResizePayload": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "cols",
+        "optional": false
+      },
+      {
+        "name": "rows",
+        "optional": false
+      }
+    ],
+    "source": "zc/t.java"
+  },
+  "com.remote.terminal.protocol.ErrorPayload": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "message",
+        "optional": true
+      }
+    ],
+    "source": "zc/C3877a.java"
+  },
+  "com.remote.terminal.protocol.OpenPayload": {
+    "field_count": 4,
+    "fields": [
+      {
+        "name": "shell",
+        "optional": false
+      },
+      {
+        "name": "cols",
+        "optional": false
+      },
+      {
+        "name": "rows",
+        "optional": false
+      },
+      {
+        "name": "option",
+        "optional": true
+      }
+    ],
+    "source": "zc/n.java"
+  },
+  "com.remote.terminal.protocol.KillSessionRespPayload": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "message",
+        "optional": true
+      }
+    ],
+    "source": "zc/k.java"
+  },
+  "com.remote.terminal.protocol.KillSessionPayload": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "session_id",
+        "optional": false
+      }
+    ],
+    "source": "zc/C3884h.java"
+  },
+  "com.remote.terminal.protocol.OpenRespPayload": {
+    "field_count": 3,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "message",
+        "optional": true
+      },
+      {
+        "name": "error_msg",
+        "optional": true
+      }
+    ],
+    "source": "zc/q.java"
+  },
+  "com.remote.terminal.protocol.UnlockReqPayload": {
+    "field_count": 1,
+    "fields": [
+      {
+        "name": "password",
+        "optional": false
+      }
+    ],
+    "source": "zc/C.java"
+  },
+  "com.remote.terminal.protocol.UnlockRespPayload": {
+    "field_count": 2,
+    "fields": [
+      {
+        "name": "code",
+        "optional": true
+      },
+      {
+        "name": "message",
+        "optional": true
+      }
+    ],
+    "source": "zc/F.java"
+  }
+}

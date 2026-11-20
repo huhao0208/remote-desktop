@@ -1,0 +1,41 @@
+# VPS 部署：不占 443。API/信令 8443，STUN/TURN 3478，中继端口 49160-49200/udp
+services:
+  uu-api:
+    build: .
+    restart: unless-stopped
+    environment:
+      UU_PUBLIC_BASE: "https://${PUBLIC_HOST}:8443"
+      UU_WS_BASE: "wss://${PUBLIC_HOST}:8443"
+      UU_STUN_URLS: "stun:${PUBLIC_HOST}:3478"
+      UU_TURN_URLS: "turn:${PUBLIC_HOST}:3478?transport=udp,turn:${PUBLIC_HOST}:3478?transport=tcp"
+      UU_TURN_SECRET: "${TURN_SECRET}"
+      UU_TURN_TTL: "86400"
+      UU_RPC_TIMEOUT: "30"
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./certs:/certs:ro
+      - uu-data:/app/data
+    healthcheck:
+      # 仅探测本地端口是否可连接，不做 TLS 校验（存活探针，不涉及机密数据）
+      test: ["CMD", "python", "-c", "import socket;socket.create_connection(('127.0.0.1',8443),3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  turn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n --log-file=stdout
+      --listening-port=3478
+      --fingerprint --lt-cred-mech --use-auth-secret
+      --static-auth-secret=${TURN_SECRET}
+      --realm=${PUBLIC_HOST}
+      --min-port=49160 --max-port=49200
+      --external-ip=${PUBLIC_HOST}
+      --no-cli --no-tls --no-dtls
+
+volumes:
+  uu-data:
