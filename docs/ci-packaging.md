@@ -249,6 +249,14 @@ v0.1.0 的 macOS/Linux Flutter 包是坏的（macOS 变成 23 KB 的 `uu_remote`
    若 WebRTC 建连失败会自动回落 JPEG，界面上会提示。
 6. **Linux Flutter 包绑定 runner 的 glibc**（ubuntu-latest，2.39+），老发行版跑不起来。
 7. 服务端二进制需自备 TLS 证书（见 §9.1 末尾）。
+8. **已知问题：随包 uu-agent 让桌面包体变大**。`uu-agent` 用 PyInstaller `--onefile`，
+   单文件 50–102 MB，导致桌面包从 18–21 MB 涨到 **82–121 MB**；且 onefile 每次启动都要
+   解压到临时目录，**冷启 4–6 s**。对照：Electron 时代 dmg 144 MB / 解包 274 MB，
+   现在 82 MB zip / 121 MB 解包，仍小 2.2 倍，换来「装上即可被控、免装 Python」。
+   **下一版计划（v0.1.3）**：
+   a) agent 改 `--onedir`（dylib 共享、zip 压缩率更高，预计 45–55 MB），
+      同时冷启从 4–6 s 降到 <1 s（不用解压）；
+   b) 若仍嫌大，再评估「首次运行按需下载 agent」。
 
 ## 10. v0.1.0 打包事故复盘（目录被当文件上传）
 
