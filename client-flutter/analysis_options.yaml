@@ -1,0 +1,18 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    todo: ignore
+  exclude:
+    - build/**
+    - '**/*.g.dart'
+    - android/**
+    - ios/**
+    - windows/**
+    - macos/**
+    - linux/**
+
+linter:
+  rules:
+    prefer_single_quotes: true
+    always_declare_return_types: true

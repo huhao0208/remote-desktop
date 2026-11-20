@@ -221,8 +221,34 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         # 运行时画质参数（控制页 stream.config 可动态调，无需重启 Agent）
         stream_cfg = {"fps": args.fps, "quality": args.quality, "width": args.width}
 
+        # WebRTC 媒体（首选）：H.264 + SRTP/UDP，信令仍走本 WS
+        rtc = None
+        if args.transport in ("webrtc", "both"):
+            try:
+                from webrtc_media import WebRTCMedia
+
+                def _on_rtc_state(state: str) -> None:
+                    # WebRTC 连上后暂停 JPEG 推流（省 CPU/带宽）；断开则自动恢复兜底
+                    if state == "connected":
+                        streaming.clear()
+                    elif state in ("failed", "closed", "disconnected"):
+                        streaming.set()
+
+                rtc = WebRTCMedia(
+                    send_json=send_json,
+                    width=args.width,
+                    fps=min(30, args.fps),
+                    bitrate_kbps=args.bitrate,
+                    on_state=_on_rtc_state,
+                )
+            except Exception as e:  # aiortc 未安装等 → 自动退回 JPEG
+                print(f"[agent] WebRTC 不可用（{e}），退回 JPEG 推流", flush=True)
+                rtc = None
+
+        media_kind = "webrtc" if rtc else "jpeg"
         await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
-                         "screen": {"w": sw, "h": sh}, "stream": dict(stream_cfg)})
+                         "screen": {"w": sw, "h": sh}, "media": media_kind,
+                         "stream": dict(stream_cfg)})
 
         async def rx() -> None:
             async for raw in ws:
@@ -233,10 +259,21 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 if p == "peer.join":
                     # 新控制端进房：重发 hello（对方可能错过首次广播）
                     await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
-                                     "screen": {"w": sw, "h": sh}, "stream": dict(stream_cfg)})
+                                     "screen": {"w": sw, "h": sh}, "media": media_kind,
+                                     "stream": dict(stream_cfg)})
                     continue
                 try:
-                    if p == "input":
+                    if p == "rtc.offer" and rtc:
+                        await rtc.handle_offer(ev.get("sdp", ""), ev.get("ice"),
+                                               str(ev.get("peer") or "default"))
+                    elif p == "rtc.ice" and rtc:
+                        await rtc.handle_ice(ev.get("candidate", ""), ev.get("sdpMid"),
+                                             ev.get("sdpMLineIndex"),
+                                             str(ev.get("peer") or "default"))
+                    elif p == "rtc.close" and rtc:
+                        await rtc.close()
+                        streaming.set()
+                    elif p == "input":
                         inject(ev)
                     elif p == "shutdown":
                         await handle_shutdown(ev, send_json)
@@ -251,7 +288,12 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                             stream_cfg["quality"] = max(30, min(90, int(ev["quality"])))
                         if ev.get("width"):
                             stream_cfg["width"] = max(640, min(3840, int(ev["width"])))
-                        await send_json({"p": "stream.config.ack", **stream_cfg})
+                        if rtc:
+                            rtc.set_config(width=ev.get("width"), fps=ev.get("fps"),
+                                           bitrate_kbps=ev.get("bitrate"))
+                        await send_json({"p": "stream.config.ack", **stream_cfg,
+                                         "media": media_kind,
+                                         "bitrate": rtc.bitrate_bps // 1000 if rtc else 0})
                     elif p == "ping":
                         await send_json({"p": "pong", "ts": ev.get("ts")})
                 except Exception as e:  # 单事件失败不断链
@@ -271,6 +313,12 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 with mss.mss() as sct:
                     mon = sct.monitors[1]
                     while not stop.is_set():
+                        # WebRTC 连上后 streaming 会被清掉：此时必须彻底停止抓屏，
+                        # 否则会和 WebRTC 抢同一个屏幕采集通道（macOS 上表现为
+                        # 后到的采集调用阻塞 30s），并发两路抓屏也白烧 CPU。
+                        if not streaming.is_set():
+                            time.sleep(0.3)
+                            continue
                         t0 = time.monotonic()
                         interval = 1.0 / stream_cfg["fps"]
                         try:
@@ -325,7 +373,11 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 stop.set()
                 cap.cancel()
 
-        await asyncio.gather(rx(), tx())
+        try:
+            await asyncio.gather(rx(), tx())
+        finally:
+            if rtc:
+                await rtc.close()  # 断链时释放 PC，避免重连后重复协商
 
 
 LAST_DEVICE: str | None = None  # 断线重连时复用，避免旧服务端堆重复设备
@@ -337,9 +389,13 @@ def main() -> int:
     ap.add_argument("--mobile", help="登录手机号（与控制页一致）")
     ap.add_argument("--token", help="复用已有登录 token（App 一体化模式，不重复登录）")
     ap.add_argument("--name", default=platform.node(), help="设备名")
-    ap.add_argument("--fps", type=int, default=15)
-    ap.add_argument("--quality", type=int, default=75, help="JPEG 质量 30-90")
+    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--quality", type=int, default=75, help="JPEG 质量 30-90（仅 jpeg 传输）")
     ap.add_argument("--width", type=int, default=1920, help="帧最大宽度（越大越清晰）")
+    ap.add_argument("--transport", choices=["webrtc", "jpeg", "both"], default="webrtc",
+                    help="媒体传输：webrtc(默认，H.264/UDP，aiortc 缺失时自动退回 jpeg) / jpeg / both")
+    ap.add_argument("--bitrate", type=int, default=8000,
+                    help="WebRTC 目标码率 kbps（默认 8000；1080p 屏幕 8M 约 45dB PSNR）")
     ap.add_argument("--insecure", action="store_true", help="跳过证书校验（自签调试）")
     args = ap.parse_args()
     if not args.mobile and not args.token:

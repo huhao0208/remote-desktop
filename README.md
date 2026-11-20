@@ -1,7 +1,7 @@
 # uu-remote-server
 
-自建 UU 远程兼容服务端：把官方客户端的信令与 API 落到自己的 VPS 上，
-媒体面仍是客户端之间的私有 WebRTC（服务端不碰屏幕数据），**打洞优先、TURN 兜底**。
+自建 UU 远程兼容服务端：控制面（账号/设备/房间/信令）跑在自己的 VPS 上，
+媒体面走 **WebRTC（H.264 + SRTP/UDP）**，服务端不碰屏幕数据，**打洞优先、TURN 兜底**。
 
 - 端口：`8443` HTTPS/WSS（不占 443） + `3478` STUN/TURN + `49160-49200/udp` 中继
 - 单文件服务端：`srv2/server.py`（FastAPI + sqlite WAL，无外部依赖）
@@ -10,14 +10,9 @@
 ## 目录
 
 ```
-client-desktop/  桌面客户端（Electron，远控+被控一体）
-client-mobile/   移动客户端（Capacitor，Android/iOS 工程）
-agent/           被控端 agent.py（推屏 + 输入注入 + 可撤销关机）
 srv2/            服务端（推荐入口）
   server.py      全部接口与信令中继
-  control.html   控制页（网页版与客户端共用同一份）
-  tests.py       34 项集成测试
-  tests_regression.py  23 项回归测试
+  tests.py       33 项集成测试
   Dockerfile · docker-compose.yml · entrypoint.sh
   deploy.sh      VPS 一键部署（本地推送或机上执行）
   run.sh         本地起服务端 + 改写代理（局域网真机联调）
@@ -56,29 +51,6 @@ python ../tools/e2e_proxy_test.py      # ALL PASS（真实 TLS 链路，证书/�
 TURN 短时效凭据（HMAC-SHA1，与 coturn `use-auth-secret` 一致）、
 未实现接口兜底并抓包。
 
-## 客户端（远控 + 被控一体，UU 远程同款形态）
-
-装一个 App 就同时具备两种能力：登录后既能把别的电脑拉过来控制，本机也自动上线、
-出现在其它设备的可控列表里。服务器地址内置，不用手输网址。
-
-```
-桌面客户端(Electron) ─┐
-                      ├─WSS→ 自建服务端 ←WSS→ 内置被控端 uu-agent
-移动客户端(Capacitor)─┘
-```
-
-| 目录 | 产物 | 形态 |
-|---|---|---|
-| `client-desktop/` | `uu-remote-client-{windows-x64,macos-arm64,macos-x64,linux-x64}` | 原生窗口 App，内含 `uu-agent` 被控端，登录即启动、登出即停、崩溃 5s 自愈 |
-| `client-mobile/` | `uu-remote-client-android.apk` · `uu-remote-client-ios-project.zip` | Android 原生壳；iOS 需 Mac+Xcode 选签名团队出 ipa |
-| `agent/agent.py` | `uu-agent` | 独立被控端，可单独部署（`--mobile` 或 `--token` 登录） |
-
-设备列表里的「本机」与内置被控端是**同一台设备**：客户端用机器级指纹
-（`hostname-OS-MAC`）注册，与 Agent 上报的 `device_id` 对齐，不会出现两条记录。
-界面上「允许其他设备远程控制本机」可一键停/启被控服务。
-
-> 权限：macOS 首次被控需在 系统设置 → 隐私与安全性 授予 **屏幕录制 + 辅助功能**。
-
 ## 手机远程控制电脑（自研轻量链路）
 
 ```
@@ -112,30 +84,19 @@ TURN 短时效凭据（HMAC-SHA1，与 coturn `use-auth-secret` 一致）、
 push `main` / 打 `v*` tag / 手动触发 `.github/workflows/build.yml`：
 先跑 33+15 项测试与 e2e 门禁，再产出四平台部署包（Artifacts，tag 时自动发 Release）：
 
-服务端/Agent 独立二进制（每平台一包，含 `uu-server` + `uu-agent`）：
+每个桌面平台包含 `uu-server`（服务端）与 `uu-agent`（被控端）两个独立二进制：
 
 | 产物 | 平台 | 形态 |
 |---|---|---|
-| `uu-remote-windows-x64.zip` | Windows | server + agent 独立 exe，免装 Python |
-| `uu-remote-macos-arm64.tar.gz` | macOS Apple Silicon | server + agent 独立可执行 |
-| `uu-remote-macos-x64.tar.gz` | macOS Intel | server + agent 独立可执行 |
-| `uu-remote-linux-x64.tar.gz` | Linux / VPS | server + agent 独立可执行（免 Docker 备选） |
-| `uu-remote-android-termux.tar.gz` | Android（Termux） | 源码 + 一键脚本 |
-| `uu-remote-universal.tar.gz` | 任意 Python 3.10+ | 通用源码包 |
+| `uu-server-windows-x64.zip` | Windows | server + agent 独立 exe，免装 Python |
+| `uu-server-macos-arm64.tar.gz` | macOS Apple Silicon | server + agent 独立可执行 |
+| `uu-server-macos-x64.tar.gz` | macOS Intel | server + agent 独立可执行 |
+| `uu-server-linux-x64.tar.gz` | Linux / VPS | server + agent 独立可执行（免 Docker 备选） |
+| `uu-server-android-termux.tar.gz` | Android（Termux） | 源码 + 一键脚本 |
+| `uu-server-universal.tar.gz` | iOS（a-Shell）及任意 Python 3.10+ | 通用源码包 |
 
-控制端客户端：
-
-| 产物 | 平台 | 形态 |
-|---|---|---|
-| `uu-remote-client-windows-x64.exe` | Windows | 安装包 + 免安装 exe（内含被控端） |
-| `uu-remote-client-macos-arm64.dmg` / `-x64.dmg` | macOS | 拖入 Applications 即用 |
-| `uu-remote-client-linux-x64.AppImage` | Linux | 单文件可执行 |
-| `uu-remote-client-android.apk` | Android | 直接安装（debug 签名） |
-| `uu-remote-client-ios-project.zip` | iOS | Xcode 工程，签名后安装 |
-
-注：客户端为 Electron / Capacitor 壳，`client-desktop/web/index.html` 与
-`client-mobile/www/index.html` 由 `srv2/control.html` 经 `scripts/sync-web.js`
-自动生成并注入服务器地址（`RD_SERVER` 环境变量可覆盖），改页面只需改 `srv2/control.html`。
+注：本仓库为服务端控制面；Android/iOS 官方客户端 App 本体不在此仓库，
+移动端包用于在手机/平板上跑自建服务端。
 
 ## 免责声明
 

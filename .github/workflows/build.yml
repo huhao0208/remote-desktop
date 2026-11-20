@@ -78,7 +78,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install fastapi "uvicorn[standard]" pyinstaller mss pillow pyautogui httpx websockets
+        # aiortc/av/numpy 供 agent 的 WebRTC 媒体通道打包用（agent/webrtc_media.py）
+        run: pip install fastapi "uvicorn[standard]" pyinstaller mss pillow pyautogui httpx websockets aiortc av numpy
       - name: Build standalone binaries (server + agent)
         shell: bash
         run: |
@@ -91,8 +92,14 @@ jobs:
             --add-data "srv2/control.html${{ matrix.sep }}." \
             --distpath dist --workpath build_tmp --specpath . \
             srv2/server.py
+          # agent 的 WebRTC 通道：webrtc_media 是同目录模块、且只在函数内 import
+          # （静态分析看不到），必须 hidden-import；av 带 ffmpeg 动态库，
+          # --collect-all av 负责把 .so/.dylib/.dll 一起收进去。
           pyinstaller --onefile --name uu-agent \
             --collect-submodules mss \
+            --collect-submodules aiortc \
+            --collect-all av \
+            --hidden-import webrtc_media \
             --hidden-import pyautogui --hidden-import PIL \
             --distpath dist --workpath build_tmp2 --specpath build_tmp2 \
             agent/agent.py
@@ -150,7 +157,7 @@ jobs:
         run: |
           mkdir -p pack-termux
           cp srv2/server.py srv2/control.html srv2/tests.py srv2/tests_regression.py pack-termux/
-          cp agent/agent.py pack-termux/
+          cp agent/agent.py agent/webrtc_media.py pack-termux/
           cp packaging/run-termux.sh pack-termux/run.sh
           cp srv2/README.md pack-termux/
           chmod +x pack-termux/run.sh
@@ -204,9 +211,12 @@ jobs:
         working-directory: .          # 回到仓库根，agent/ 与 dist 路径才成立
         shell: bash
         run: |
-          pip install pyinstaller mss pillow pyautogui httpx websockets
+          pip install pyinstaller mss pillow pyautogui httpx websockets aiortc av numpy
           pyinstaller --onefile --name uu-agent \
             --collect-submodules mss \
+            --collect-submodules aiortc \
+            --collect-all av \
+            --hidden-import webrtc_media \
             --hidden-import pyautogui --hidden-import PIL \
             --distpath client-desktop/bin --workpath build_tmp_agent --specpath build_tmp_agent \
             agent/agent.py
@@ -302,6 +312,100 @@ jobs:
         with:
           name: uu-remote-client-ios-project
           path: uu-remote-client-ios-project.zip
+          retention-days: 30
+
+  # ------------------------------------------------ Flutter 控制端（client-flutter）
+  # 版本必须钉 3.50.1（Dart 3.14）：工程用 material_ui 1.11.x + 3.50 模板写法，
+  # 低版本 pub get 直接失败。不要为了过 CI 放松 pubspec 的 sdk 约束，升级 Flutter 才对。
+  flutter-verify:
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze --fatal-infos
+      - run: flutter test
+
+  # macOS 桌面 App（runner 自带 Xcode；产物是 .app 目录，upload-artifact 会自动打包）
+  flutter-build-macos:
+    needs: flutter-verify
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client-flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-flutter-macos
+          path: client-flutter/build/macos/Build/Products/Release/*.app
+          retention-days: 30
+
+  # Linux 桌面 App：runner 需先装 GTK/CMake 工具链
+  flutter-build-linux:
+    needs: flutter-verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-flutter
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux desktop toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-flutter-linux
+          path: client-flutter/build/linux/x64/release/bundle
+          retention-days: 30
+
+  # Android APK：未配正式签名，release 包用 debug key 签名（可装可跑，不能上架）
+  flutter-build-android:
+    needs: flutter-verify
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - name: Rename APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk uu-remote-client-flutter-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uu-remote-client-flutter-android
+          path: client-flutter/uu-remote-client-flutter-android.apk
           retention-days: 30
 
   # ------------------------------------------------ tag 时发布 Release

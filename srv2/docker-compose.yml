@@ -28,13 +28,15 @@ services:
     restart: unless-stopped
     network_mode: host
     command: >
-      -n --log-file=stdout
+      -c /dev/null --log-file=stdout
       --listening-port=3478
+      --listening-ip=${TURN_PRIVATE_IP}
+      --relay-ip=${TURN_PRIVATE_IP}
       --fingerprint --lt-cred-mech --use-auth-secret
       --static-auth-secret=${TURN_SECRET}
       --realm=${PUBLIC_HOST}
       --min-port=49160 --max-port=49200
-      --external-ip=${PUBLIC_HOST}
+      --external-ip=${PUBLIC_HOST}/${TURN_PRIVATE_IP}
       --no-cli --no-tls --no-dtls
 
 volumes:

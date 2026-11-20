@@ -20,6 +20,7 @@ button.danger{background:#da3633;border-color:#f85149}
 button:disabled{opacity:.4}
 #stage{flex:1;position:relative;background:#000;display:none;touch-action:none;overflow:hidden}
 #view{position:absolute;inset:0;width:100%;height:100%;display:block}
+#vid{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none;background:#000}
 #hud{position:absolute;top:6px;right:8px;font-size:11px;color:#9ee493;background:rgba(0,0,0,.45);padding:2px 8px;border-radius:10px;pointer-events:none;z-index:2}
 #bar{flex:none;display:none;gap:6px;padding:8px;background:#161b22;flex-wrap:wrap}
 #bar button{padding:8px 10px;font-size:13px}
@@ -61,12 +62,12 @@ h3{font-size:13px;color:#8b949e;font-weight:400;margin:4px 0 8px}
   <small id="acct"></small>
 </div>
 
-<div id="stage"><canvas id="view"></canvas><div id="hud"></div><input id="kbd" autocomplete="off"></div>
+<div id="stage"><video id="vid" autoplay playsinline muted></video><canvas id="view"></canvas><div id="hud"></div><input id="kbd" autocomplete="off"></div>
 <div id="bar">
   <select id="quality" title="画质">
-    <option value="1280,55">流畅</option>
-    <option value="1920,75">高清</option>
-    <option value="2560,80">超清</option>
+    <option value="1280,55,4000">流畅 1280 · 4M</option>
+    <option value="1920,75,8000">高清 1920 · 8M</option>
+    <option value="2560,80,20000">超清 2560 · 20M</option>
   </select>
   <button class="sec" id="btnKbd">⌨️ 键盘</button>
   <button class="sec" id="btnCtrl2Cmd" style="display:none">Ctrl→⌘ 开</button>
@@ -188,8 +189,8 @@ async function openRoom(){
     $('devPanel').style.display='none';$('stage').style.display='block';$('bar').style.display='flex';
     clearInterval(devTimer);
     fitCanvas();
-    const [w,q]=($('quality').value||'1280,55').split(',').map(Number);
-    send({p:'stream.config',width:w,quality:q,fps:15});
+    const [w,q,br]=($('quality').value||'1920,75,8000').split(',').map(Number);
+    send({p:'stream.config',width:w,quality:q,fps:30,bitrate:br});
     send({p:'stream.resume'});
     focusKbd(); // 桌面端进房即接管物理键盘，无需先点「键盘」按钮
   };
@@ -208,6 +209,76 @@ function scheduleReconnect(){
 // ---- Canvas 渲染：只画最新帧（解码积压时丢旧帧，延迟不累积）----
 const view=$('view'),vctx=view.getContext('2d',{alpha:false,desynchronized:true});
 let pendingBlob=null,decoding=false,fpsCnt=0,fpsVal=0,lastHud=0,lastOwd=null;
+
+// ---- WebRTC 收流：H.264 硬解 + SRTP/UDP；失败自动回落到上面的 JPEG/canvas 通路 ----
+let pc=null,rtcOn=false,rtcState='',rtcMbps=0,rtcRtt=null,rtcFirstFrame=0,rtcOfferAt=0;
+const vEl=$('vid');
+// 把服务端下发的 ice_servers 映射成浏览器 RTCIceServer 数组
+function iceList(){
+  const out=[],ice=(room&&room.ice_servers)||{};
+  (ice.stun||[]).forEach(u=>out.push({urls:u}));
+  (ice.turn||[]).forEach(t=>{if(t&&t.urls)out.push({urls:t.urls,username:t.username,credential:t.credential})});
+  return out;
+}
+async function startRTC(){
+  // 已在协商/已连上就不重复发起：hello 会在 peer.join 时重发，重复 offer 会互相踢
+  if(pc&&pc.connectionState&&['new','connecting','connected'].includes(pc.connectionState))return;
+  stopRTC();
+  try{
+    pc=new RTCPeerConnection({iceServers:iceList(),bundlePolicy:'max-bundle',iceCandidatePoolSize:2});
+  }catch(e){toast('浏览器不支持 WebRTC，使用 JPEG 通路');return}
+  // 关键：宁可掉帧也不降分辨率（糊的主因就是带宽紧时自动降分辨率）
+  try{
+    const tr=pc.addTransceiver('video',{direction:'recvonly'});
+    tr.degradationPreference='maintain-resolution';
+  }catch(e){pc.addTransceiver('video',{direction:'recvonly'})}
+  pc.ontrack=e=>{
+    vEl.srcObject=e.streams[0];
+    vEl.style.display='block';view.style.display='none';
+    vEl.play().catch(()=>{});
+    if(!rtcFirstFrame)rtcFirstFrame=performance.now();
+  };
+  pc.onicecandidate=e=>{if(e.candidate)send({p:'rtc.ice',candidate:e.candidate.candidate,sdpMid:e.candidate.sdpMid,sdpMLineIndex:e.candidate.sdpMLineIndex,peer:myDev||'ctl'})};
+  pc.onconnectionstatechange=()=>{
+    rtcState=pc.connectionState;
+    if(rtcState==='failed'){toast('WebRTC 连接失败，回落 JPEG');stopRTC()}
+  };
+  rtcOn=true;rtcOfferAt=performance.now();
+  const offer=await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  send({p:'rtc.offer',sdp:offer.sdp,ice:iceList(),peer:myDev||'ctl'});
+}
+function stopRTC(){
+  if(pc){try{pc.close()}catch(e){}pc=null}
+  rtcOn=false;rtcState='';rtcFirstFrame=0;
+  try{vEl.srcObject=null}catch(e){}
+  vEl.style.display='none';view.style.display='block';
+}
+// 读 WebRTC 统计：实测码率 / 帧率 / RTT / 抖动缓冲
+async function rtcStats(){
+  if(!pc)return;
+  let inb=null,pair=null;
+  try{
+    const s=await pc.getStats();
+    s.forEach(r=>{
+      if(r.type==='inbound-rtp'&&r.kind==='video')inb=r;
+      if(r.type==='candidate-pair'&&r.state==='succeeded'&&r.nominated)pair=r;
+    });
+  }catch(e){return}
+  if(inb){
+    if(rtcStats._t&&rtcStats._b!=null){
+      const dt=(performance.now()-rtcStats._t)/1000;
+      if(dt>0.5)rtcMbps=Math.max(0,((inb.bytesReceived-rtcStats._b)*8/1e6/dt));
+    }
+    rtcStats._t=performance.now();rtcStats._b=inb.bytesReceived;
+    rtcStats.fps=inb.framesPerSecond||0;
+    rtcStats.w=inb.frameWidth||0;rtcStats.h=inb.frameHeight||0;
+    rtcStats.jb=inb.jitterBufferDelay!=null&&inb.jitterBufferEmittedCount?
+      Math.round(inb.jitterBufferDelay/inb.jitterBufferEmittedCount*1000):null;
+    rtcStats.dropped=inb.framesDropped||0;
+  }
+  if(pair&&pair.currentRoundTripTime!=null)rtcRtt=Math.round(pair.currentRoundTripTime*1000);
+}
 function fitCanvas(){
   const r=view.getBoundingClientRect(),dpr=Math.min(2,devicePixelRatio||1);
   const w=Math.round(r.width*dpr),h=Math.round(r.height*dpr);
@@ -229,10 +300,23 @@ function drawLatest(){
     bmp.close();
   }).catch(()=>{}).finally(()=>{decoding=false;if(pendingBlob)drawLatest()});
 }
-setInterval(()=>{fpsVal=fpsCnt;fpsCnt=0;
-  if(ws&&ws.readyState===1&&lastFrame)$('hud').textContent=fpsVal+' fps · '+screenW+'×'+screenH+(lastOwd!=null?' · '+lastOwd+'ms':'');
+setInterval(async()=>{
+  fpsVal=fpsCnt;fpsCnt=0;
+  if(rtcOn){
+    await rtcStats();
+    const res=rtcStats.w?`${rtcStats.w}×${rtcStats.h}`:`${screenW}×${screenH}`;
+    const parts=['H.264',(rtcStats.fps||0)+' fps',res];
+    if(rtcMbps)parts.push(rtcMbps.toFixed(1)+' Mbps');
+    if(rtcRtt!=null)parts.push('RTT '+rtcRtt+'ms');
+    if(rtcStats.jb!=null)parts.push('缓冲 '+rtcStats.jb+'ms');
+    if(rtcStats.dropped)parts.push('丢'+rtcStats.dropped);
+    $('hud').textContent=parts.join(' · ');
+    lastFrame=Date.now(); // 让看门狗知道画面仍在更新
+  }else if(ws&&ws.readyState===1&&lastFrame){
+    $('hud').textContent=fpsVal+' fps · '+screenW+'×'+screenH+(lastOwd!=null?' · '+lastOwd+'ms':'');
+  }
 },1000);
-function onMsg(e){
+async function onMsg(e){
   if(e.data instanceof ArrayBuffer){
     const b=new Uint8Array(e.data);
     if(b.length>4&&b[0]===70&&b[1]===82&&b[2]===77&&b[3]===49){ // FRM1
@@ -250,8 +334,22 @@ function onMsg(e){
     }
   }else{
     let m;try{m=JSON.parse(e.data)}catch(e){return}
-    if(m.p==='agent.hello'){screenW=m.screen.w;screenH=m.screen.h;remoteOs=m.os||'';applyCombos();toast('已连接 '+m.name+' ('+m.os+')'+(m.os==='Darwin'&&matchMedia('(pointer:fine)').matches?' · 物理键盘已接管':''))}
-    else if(m.p==='stream.config.ack')toast(`画质已切换 ${m.width}px · ${m.fps}fps`);
+    if(m.p==='agent.hello'){
+      screenW=m.screen.w;screenH=m.screen.h;remoteOs=m.os||'';applyCombos();
+      toast('已连接 '+m.name+' ('+m.os+')'+(m.os==='Darwin'&&matchMedia('(pointer:fine)').matches?' · 物理键盘已接管':''));
+      // Agent 支持 WebRTC 就走 H.264/UDP；否则沿用 JPEG 通路
+      if(m.media==='webrtc')startRTC();else stopRTC();
+    }
+    else if(m.p==='rtc.answer'){
+      try{await pc.setRemoteDescription({type:'answer',sdp:m.sdp})}catch(e){toast('协商失败，回落 JPEG');stopRTC();return}
+      // 抖动缓冲压到最小（实时优先，宁可偶尔卡一帧也不攒延迟）
+      try{const r=pc.getReceivers()[0];if(r&&'jitterBufferTarget'in r)r.jitterBufferTarget=0}catch(e){}
+      setStatus('● 实时 · '+devName);
+    }
+    else if(m.p==='rtc.ice'&&pc){
+      try{await pc.addIceCandidate({candidate:m.candidate,sdpMid:m.sdpMid,sdpMLineIndex:m.sdpMLineIndex})}catch(e){}
+    }
+    else if(m.p==='stream.config.ack')toast(`画质已切换 ${m.width}px · ${m.fps}fps${m.bitrate?' · '+m.bitrate+'kbps':''}`);
     else if(m.p==='shutdown.state'){
       if(m.state==='pending'){$('sdTitle').textContent='关机倒计时 '+m.remain+'s';$('sdGo').style.display='none';$('sdCancel').textContent='撤销关机';$('sdModal').style.display='flex'}
       else{$('sdModal').style.display='none';toast(m.state==='cancelled'?'已撤销关机':m.state==='executing'?'正在关机…':'关机状态: '+m.state)}
@@ -259,11 +357,11 @@ function onMsg(e){
     else if(m.p==='agent.error')toast('Agent: '+m.err);
   }
 }
-$('quality').value=localStorage.getItem('rd_quality')||'1280,55';
+$('quality').value=localStorage.getItem('rd_quality')||'1920,75,8000';
 $('quality').onchange=()=>{
-  const [w,q]=$('quality').value.split(',').map(Number);
+  const [w,q,br]=$('quality').value.split(',').map(Number);
   localStorage.setItem('rd_quality',$('quality').value);
-  send({p:'stream.config',width:w,quality:q,fps:15});
+  send({p:'stream.config',width:w,quality:q,fps:30,bitrate:br});
 };
 const send=o=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))};
 
