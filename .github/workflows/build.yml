@@ -413,9 +413,9 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip"
           # 用 sed 不用 head：head 读够就关管道 → 上游 SIGPIPE，配 pipefail 会误判失败
           unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" | sed -n '1,6p'
-          # 断言 agent 真的进了包，别只信构建目录
-          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" \
-            | grep -q "uu_remote.app/Contents/Resources/agent/uu-agent" \
+          # 断言 agent 真的进了包，别只信构建目录（同样避开 unzip | grep -q 的 SIGPIPE）
+          unzip -l "$GITHUB_WORKSPACE/uu-remote-client-flutter-macos.zip" > /tmp/pkg-list.txt
+          grep -q "uu_remote.app/Contents/Resources/agent/uu-agent" /tmp/pkg-list.txt \
             || { echo "zip 里没有随包 uu-agent"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
@@ -467,9 +467,10 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz"
           # 同上：不能 head，SIGPIPE 会让 tar 返回错误码
           tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" | sed -n '1,5p'
-          # 断言随包被控端在 tar 里
-          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" \
-            | grep -q "bundle/data/flutter_assets/agent/uu-agent" \
+          # 断言随包被控端在 tar 里。注意不能写成 tar | grep -q：
+          # grep 匹配到就退出，tar 继续写会拿到 SIGPIPE，pipefail 下把整条判成失败。
+          tar -tzf "$GITHUB_WORKSPACE/uu-remote-client-flutter-linux.tar.gz" > /tmp/pkg-list.txt
+          grep -q "bundle/data/flutter_assets/agent/uu-agent" /tmp/pkg-list.txt \
             || { echo "tar 里没有随包 uu-agent"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
