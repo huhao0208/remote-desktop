@@ -131,9 +131,13 @@ Python 3.12 下 `numpy 2.5` 要求 ≥3.11、`av 19` 要求 ≥3.9、`aiortc 1.1
 
 ## 9. Release 资产清单
 
-以 tag `v0.1.1` 为准（`v0.1.0` 的 `uu_remote` 是个 23 KB 的假文件，已标记为
-pre-release，只作历史保留，**不要下载**）。体积为 `v0.1.0` 实测值四舍五入，
-除两个 Flutter 桌面包外 v0.1.1 与之一致。
+以 tag `v0.1.1` 为准（run `44749306740`，14 个 job 全绿）。体积取自 v0.1.1 Release
+页实测值，四舍五入到 MB。`v0.1.0` 已标记为 **pre-release**，它的 `uu_remote` 是个
+23 KB 的假文件、Linux 桌面包还缺失，只作历史保留，**不要下载**。
+
+> 仓库当前是 **private**，直接 `curl` 资产链接会 404（返回 `Not Found`），
+> 必须用 `gh release download v0.1.1 -R huhao0208/remote-desktop` 或浏览器登录后点。
+> 要对外分享需先公开仓库（由仓库主决定）。
 
 ### 9.1 服务端 + 被控端（同一份包内含 `uu-server` 与 `uu-agent`）
 
@@ -173,8 +177,8 @@ pre-release，只作历史保留，**不要下载**）。体积为 `v0.1.0` 实�
 
 | 资产 | 体积 | 给谁用 |
 |---|---|---|
-| `uu-remote-client-flutter-macos.zip` | 17 MB | macOS 桌面版；解压得 `uu_remote.app`（未签名，右键「打开」） |
-| `uu-remote-client-flutter-linux.tar.gz` | 9.6 MB | Linux 桌面版；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
+| `uu-remote-client-flutter-macos.zip` | 18 MB | macOS 桌面版；解压得 `uu_remote.app`（未签名，右键「打开」） |
+| `uu-remote-client-flutter-linux.tar.gz` | 10 MB | Linux 桌面版；解压得 `bundle/` 目录，跑 `bundle/uu_remote` |
 | `uu-remote-client-flutter-android.apk` | 51 MB | 安卓版（debug key 签名，可装不可上架） |
 
 这两个桌面包在 v0.1.0 里是坏的（macOS 变成 23 KB 的 `uu_remote`、Linux 整个丢失），
