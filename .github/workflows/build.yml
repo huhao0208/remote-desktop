@@ -86,11 +86,12 @@ jobs:
       - name: Build standalone binaries (server + agent)
         shell: bash
         run: |
-          # 注意：--add-data 源路径相对 CWD（仓库根），不受 --specpath 影响
+          # --add-data 的源路径相对 spec 文件所在目录（--specpath），必须给绝对路径，
+          # 否则会去找 build_tmp/srv2/control.html 而失败
           pyinstaller --onefile --name uu-server \
             --collect-submodules uvicorn \
             --hidden-import websockets \
-            --add-data "srv2/control.html${{ matrix.sep }}." \
+            --add-data "$PWD/srv2/control.html${{ matrix.sep }}." \
             --distpath dist --workpath build_tmp --specpath build_tmp \
             srv2/server.py
           pyinstaller --onefile --name uu-agent \
@@ -218,10 +219,10 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Sync control page into client
         run: node scripts/sync-web.js
+      # 不注入 GH_TOKEN：electron-builder 一旦探测到发布凭据就会去算更新通道
+      # （computeChannelNames），没有 repository 字段时直接崩在 'reading channel'
       - name: Build client
         run: npx electron-builder ${{ matrix.build }} --publish never
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
         with:
           name: uu-remote-client-${{ matrix.name }}
@@ -248,7 +249,13 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      # ubuntu-latest 镜像已自带 Android SDK，不必再跑 setup-android
+      # （它自己的 sdkmanager 在无交互环境里会因许可证未接受而 exit 1）
+      - name: Accept Android licenses
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
       - name: Install deps & sync web
         run: |
           npm install --no-audit --no-fund
