@@ -40,8 +40,14 @@ TransportStats parseInboundStats(
       final double seconds = now.difference(lastAt).inMilliseconds / 1000.0;
       if (seconds > 0.1) {
         final int delta = frames - lastFrames;
-        // 计数器回绕/重置时别报负数
-        fps = delta <= 0 ? 0 : (delta / seconds).round();
+        if (delta < 0) {
+          // 计数器回退 = 换了 SSRC / 轨被替换：这一拍算不出 fps，给 null（HUD 显示 —），
+          // 不要报成 0 ——「0 fps」的语义是「到过帧又停了」，和重置不是一回事。
+          fps = null;
+        } else {
+          // delta == 0 才是真的卡住，如实报 0
+          fps = (delta / seconds).round();
+        }
       }
     }
   }

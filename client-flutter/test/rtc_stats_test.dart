@@ -104,14 +104,14 @@ void main() {
       expect(stats.fps, 0);
     });
 
-    test('计数器回绕/重置不会算出负数', () {
+    test('计数器回退（换 SSRC/轨被替换）→ 这一拍给 null，不报假 0', () {
       final TransportStats stats = parseInboundStats(
         <String, dynamic>{'framesDecoded': 5},
         lastFrames: 900,
         lastAt: now.subtract(const Duration(seconds: 1)),
         now: now,
       );
-      expect(stats.fps, 0);
+      expect(stats.fps, isNull);
     });
   });
 }
