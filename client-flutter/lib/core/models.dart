@@ -203,6 +203,10 @@ class AgentHello {
     this.power = const <String>[],
     this.privacy = 'off',
     this.privacyEngine = 'unknown',
+    this.file = false,
+    this.receiveDir,
+    this.cursorEngine = 'unknown',
+    this.mic = false,
   });
 
   final String name;
@@ -247,6 +251,23 @@ class AgentHello {
   /// 防窥引擎：`overlay`（真遮罩窗）/ `unsupported`（平台做不了）。
   final String privacyEngine;
 
+  /// 协议 v3 §2：是否支持文件传输。老 Agent → false（菜单里置灰并说明要升级）。
+  final bool file;
+
+  /// 被控端的文件接收目录（显示用：「发送到 …」）。
+  final String? receiveDir;
+
+  /// 协议 v3 §3：`win-show-cursor` / `mac-cgdisplay` / `unsupported`。
+  /// `unsupported` 时控制端要把「使用主控端鼠标」置灰，而不是给个点了没反应的开关。
+  final String cursorEngine;
+
+  /// 被控端能不能隐藏自己的系统光标（决定「使用主控端鼠标」可不可选）。
+  bool get cursorSupported => cursorEngine != 'unsupported' && cursorEngine != 'unknown';
+
+  /// 协议 v3 §6：被控端能否接收控制端麦克风（有可用放音设备）。
+  /// 老 Agent 不发该字段 → false，控制端把麦克风按钮置灰并说明要升级。
+  final bool mic;
+
   bool supportsPower(String action) {
     if (power.isEmpty) return action == 'shutdown';
     return power.contains(action);
@@ -280,6 +301,10 @@ class AgentHello {
       power: _asStringList(json['power']),
       privacy: _asString(json['privacy'], 'off'),
       privacyEngine: _asString(json['privacy_engine'], 'unknown'),
+      file: _asBool(json['file']),
+      receiveDir: _asString(json['receive_dir']).isEmpty ? null : _asString(json['receive_dir']),
+      cursorEngine: _asString(json['cursor'], 'unknown'),
+      mic: _asBool(json['mic']),
     );
   }
 }

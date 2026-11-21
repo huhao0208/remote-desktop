@@ -10,6 +10,25 @@ class InputEvent {
   static Map<String, dynamic> move(num x, num y) =>
       <String, dynamic>{'p': 'input', 't': 'move', 'x': _norm(x), 'y': _norm(y)};
 
+  /// 相对位移（协议 v3 §3，只用于「使用主控端鼠标」与游戏模式）。
+  ///
+  /// 与 [move] 的区别是语义：绝对坐标要求两端坐标系一致，一个网络抖动就会「跳」；
+  /// 相对位移由被控端在本地累加并 warp，**不吃系统指针加速**，所以手感线性可控。
+  /// [dx]/[dy] 是屏幕宽/高的归一化比例（0.001 = 0.1%），**不裁到 0..1**——负值合法。
+  static Map<String, dynamic> moveRel(num dx, num dy) => <String, dynamic>{
+        'p': 'input',
+        't': 'moverel',
+        'dx': dx.toDouble(),
+        'dy': dy.toDouble(),
+      };
+
+  /// 被控端系统光标可见性（协议 v3 §3）。
+  ///
+  /// 切回「使用被控端鼠标」时**必须**发 `visible:true`，否则远端光标一直藏着，
+  /// 用户会以为鼠标坏了。
+  static Map<String, dynamic> cursor(bool visible) =>
+      <String, dynamic>{'p': 'cursor', 'visible': visible};
+
   static Map<String, dynamic> click(num x, num y, {String btn = 'left'}) =>
       <String, dynamic>{'p': 'input', 't': 'click', 'btn': btn, 'x': _norm(x), 'y': _norm(y)};
 

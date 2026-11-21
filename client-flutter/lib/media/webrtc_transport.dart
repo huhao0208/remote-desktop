@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../core/mic_switch.dart';
 import '../core/models.dart';
 import '../core/settings.dart';
 import '../signaling/signaling_client.dart';
@@ -50,6 +51,13 @@ class WebRtcTransport extends MediaTransport {
   MediaStreamTrack? _audioTrack;
   bool _audioMuted = false;
 
+  /// 预留的 audio transceiver（协议 v3 §6.4）。开麦时对它 replaceTrack，
+  /// 不重新协商。null = 本会话不支持推麦克风。
+  RTCRtpTransceiver? _micTx;
+
+  /// 本地麦克风轨。**必须显式 stop()**，否则系统麦克风指示灯一直亮。
+  MediaStreamTrack? _micTrack;
+
   /// 候选可能早于 answer 到达，先缓存再补投（协议 §2.3）。
   final List<RTCIceCandidate> _pendingCandidates = <RTCIceCandidate>[];
 
@@ -90,6 +98,76 @@ class WebRtcTransport extends MediaTransport {
   @override
   bool get hasAudio => _audioTrack != null;
 
+  /// 只有真的拿到了预留 transceiver 才算能推麦克风。
+  @override
+  bool get canSendMic => _micTx != null;
+
+  @override
+  Future<MicError?> enableMic() async {
+    final RTCRtpTransceiver? tx = _micTx;
+    if (tx == null) return MicError.unsupported;
+    if (_micTrack != null) return null; // 已经开着，幂等
+
+    MediaStreamTrack? track;
+    try {
+      track = await navigator.mediaDevices.getUserMedia(<String, dynamic>{
+        'audio': <String, dynamic>{
+          // 控制端扬声器正在放被控端的声音，不开 AEC 会形成回授啸叫。
+          // 这两项是协议 §6.1 的硬要求，不是「优化项」。
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+        },
+        'video': false,
+      }).then((MediaStream s) => s.getAudioTracks().isEmpty ? null : s.getAudioTracks().first);
+    } catch (e) {
+      // 拒权 / 无设备都走这里。不能抛：调用方靠返回值弹回开关。
+      debugPrint('[webrtc] 获取麦克风失败：$e');
+      return MicError.noTrack;
+    }
+    if (track == null) return MicError.noTrack;
+    if (_disposed) {
+      // 授权期间页面已经销毁：立刻释放，否则麦克风指示灯会亮着
+      await track.stop();
+      return MicError.unsupported;
+    }
+
+    try {
+      // 关键一步：replaceTrack 而不是 addTrack —— 不触发重协商（协议 §6.4）
+      await tx.sender.replaceTrack(track);
+      _micTrack = track;
+      // 有些平台 replaceTrack 后还要显式打开方向，否则发送端仍是 inactive
+      try {
+        await tx.setDirection(TransceiverDirection.SendRecv);
+      } catch (_) {
+        // 部分实现不支持运行时改方向，replaceTrack 已足够
+      }
+      return null;
+    } catch (e) {
+      debugPrint('[webrtc] 挂载本地麦克风失败：$e');
+      await track.stop();
+      return MicError.unsupported;
+    }
+  }
+
+  @override
+  Future<void> disableMic() async {
+    final MediaStreamTrack? track = _micTrack;
+    _micTrack = null;
+    if (track == null) return;
+    try {
+      // 必须先停采集再断 sender，否则个别平台会留一个僵尸 sender
+      await track.stop();
+    } catch (e) {
+      debugPrint('[webrtc] 停止麦克风失败：$e');
+    }
+    try {
+      await _micTx?.sender.replaceTrack(null);
+    } catch (e) {
+      debugPrint('[webrtc] 摘除麦克风轨失败：$e');
+    }
+  }
+
   @override
   Future<void> setAudioMuted(bool muted) async {
     _audioMuted = muted;
@@ -116,14 +194,15 @@ class WebRtcTransport extends MediaTransport {
     // 建 PC / 加 transceiver / setLocal 任何一步失败都**不往外抛**：
     // 统一记成 fallbackReason，页面 start() 返回后补查并切 JPEG（协议 §5）。
     try {
-      await _openSession(room, withAudio: hello.audio);
+      await _openSession(room, withAudio: hello.audio, withMic: hello.mic);
     } catch (e, stack) {
       debugPrint('[webrtc] 初始化失败：$e\n$stack');
       _notifyFallback('初始化失败：$e');
     }
   }
 
-  Future<void> _openSession(RoomConfig room, {required bool withAudio}) async {
+  Future<void> _openSession(RoomConfig room,
+      {required bool withAudio, required bool withMic}) async {
     final RTCVideoRenderer renderer = RTCVideoRenderer();
     await renderer.initialize();
     _renderer = renderer;
@@ -146,12 +225,20 @@ class WebRtcTransport extends MediaTransport {
     // 协议 v2 §1：hello 声明有音频才加 audio m-line。
     // Agent 侧是「offer 里有 m=audio 才 addTrack」，所以这条 m-line 决定了能否收到声音；
     // 老 Agent（hello 无 audio）完全不受影响。
-    if (withAudio) {
+    //
+    // 协议 v3 §6.4：这条 m-line 建成 **sendrecv 但先不挂本地轨**，为「控制端麦克风」
+    // 预留反向能力。这样开麦时只需 replaceTrack，**零重协商**——Agent 的 handle_offer
+    // 对同 peer 是「先关旧会话再重建」，一旦触发 re-offer 画面会黑一下。
+    if (withAudio || withMic) {
       await _prepareAudioOutput();
-      await pc.addTransceiver(
+      final RTCRtpTransceiver audioTx = await pc.addTransceiver(
         kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-        init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+        init: RTCRtpTransceiverInit(
+          // 有麦克风能力才要 sendrecv，否则保持 recvonly（不多占一条发送通道）
+          direction: withMic ? TransceiverDirection.SendRecv : TransceiverDirection.RecvOnly,
+        ),
       );
+      if (withMic) _micTx = audioTx;
     }
 
     pc.onTrack = (RTCTrackEvent event) {

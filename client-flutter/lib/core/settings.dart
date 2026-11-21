@@ -27,6 +27,9 @@ class Settings {
   static const String _kClipboardSync = 'clipboard_sync';
   static const String _kShortcuts = 'shortcuts_json';
   static const String _kMiniWindow = 'mini_window_json';
+  static const String _kMouseSettings = 'mouse_settings_json';
+  static const String _kKeyMapping = 'key_mapping_json';
+  static const String _kReceiveDir = 'file_receive_dir';
 
   // ---- 自动升级（v0.2.0 起）----
   static const String _kUpdateCheckMs = 'update_last_check_ms';
@@ -160,6 +163,32 @@ class Settings {
 
   static Future<void> setMiniWindowJson(String value) =>
       _prefs.setString(_kMiniWindow, value);
+
+  /// 鼠标模式（三模式 + 游戏模式 + 速度），协议 v3 §3。
+  ///
+  /// 存 JSON 而不是拆三个 key：`MouseSettings.toJson/fromJson` 已经做了容错，
+  /// 以后加字段（比如指针加速曲线）不用再动设置层。
+  static String get mouseSettingsJson => _prefs.getString(_kMouseSettings) ?? '';
+
+  static Future<void> setMouseSettingsJson(String value) =>
+      _prefs.setString(_kMouseSettings, value);
+
+  /// 外设组：跨平台键位映射（协议 v3 §4）。
+  static String get keyMappingJson => _prefs.getString(_kKeyMapping) ?? '';
+
+  static Future<void> setKeyMappingJson(String value) =>
+      _prefs.setString(_kKeyMapping, value);
+
+  /// 文件传输的本机接收目录。空串 = 用平台默认（下载目录下的 UU Remote）。
+  static String get receiveDir => _prefs.getString(_kReceiveDir) ?? '';
+
+  static Future<void> setReceiveDir(String value) async {
+    if (value.isEmpty) {
+      await _prefs.remove(_kReceiveDir);
+    } else {
+      await _prefs.setString(_kReceiveDir, value);
+    }
+  }
 
   static bool get hasSession => token.isNotEmpty && deviceId.isNotEmpty;
 

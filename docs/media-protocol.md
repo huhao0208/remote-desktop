@@ -332,7 +332,7 @@ v1 的 `keydown/keyup` 只发单键，被控端按一下就抬起，导致 Shift
 | 平台 | 遮罩窗 | 熄屏 | 结论 |
 |---|---|---|---|
 | Windows | 可用（`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` 让窗口不进录屏） | 可用 | `overlay` |
-| macOS | **会被自己的采集录进去**（mss/screencapture 抓的是合成后的整屏） | **采集直接失效** | `unsupported` |
+| macOS | 可用（`NSWindow.sharingType=NSWindowSharingNone`，ctypes 零依赖；实测遮罩占比 91.7%→0.2%） | **采集直接失效** | `overlay`（`screenoff` 档拒绝） |
 | Linux | 会被自己的采集录进去（X11 无排除 API） | 依赖 DPMS，Wayland 无 | `unsupported` |
 
 macOS 实测（2026-11-21，2048×1280）：`pmset displaysleepnow` 之后
@@ -394,3 +394,201 @@ macOS 实测（2026-11-21，2048×1280）：`pmset displaysleepnow` 之后
 - [x] 静音：macOS `osascript` 置位/复位均回读 `mute_ok:true`，测完已恢复外放
 - [ ] 防窥：Windows 遮罩窗「不进录屏」待真机验证（macOS/Linux 明确 `unsupported`）
 - [ ] 自动锁屏：需真机断开验证（本次仅验证开关落盘与回执）
+
+---
+
+# 协议 v3 扩展（2026-11-21 追加）：文件传输 / 鼠标模式 / 键盘映射 / 控制端麦克风
+
+> 这三块是 B 阶段的功能本体。契约先行：控制端（`client-flutter/`）与
+> 被控端（`agent/`）各自实现，谁都不许私自加字段。
+
+## 1. 文件传输：为什么走信令 WS
+
+控制端有两条媒体通路——WebRTC（`rtc.*`）和 JPEG 兜底（二进制帧）。文件传输要在
+**两者都可用**，否则「低配环境传不了文件」。而信令 WS 在服务端是**透明中继**
+（`srv2/server.py::signaling`，文本按 JSON 广播、二进制原样转发），与媒体通路正交。
+
+所以 v3 统一走信令 WS 的**文本帧 + base64**：
+
+- 单块原始 32KB（base64 后约 43.7KB）。块再大就会把同一条 WS 上的 `input`
+  堵在队头——输入延迟是体感生命线，传输慢一点可以忍，点一下慢半秒不行
+- 不用二进制帧：JPEG 通路的二进制帧是 agent→client 的图片，再塞一路
+  方向语义不同、需要额外帧头区分的二进制流，解析成本大于省下的 33% 带宽
+- 服务端零改动：中继本来就透明
+
+## 2. 消息全集
+
+控制端 → Agent：
+
+```json
+{"p":"file.offer","id":"f-1763700000-4821","name":"a.zip","size":10485760,"offset":0}
+{"p":"file.chunk","id":"…","off":32768,"data":"<base64 ≤32KB>"}
+{"p":"file.done","id":"…","sha256":"<hex 可省略>"}
+{"p":"file.cancel","id":"…","reason":"user"}
+{"p":"file.get","id":"…","path":"/Users/x/a.zip","offset":0}
+{"p":"file.list","dir":""}
+```
+
+Agent → 控制端：
+
+```json
+{"p":"file.accept","id":"…","name":"a.zip","size":10485760,"path":"/Users/x/Downloads/a.zip","offset":0,"mode":"new"}
+{"p":"file.reject","id":"…","reason":"denied|no_space|too_large|bad_name|unsupported"}
+{"p":"file.chunk","id":"…","off":0,"data":"<base64>"}
+{"p":"file.progress","id":"…","received":1048576}
+{"p":"file.complete","id":"…","path":"…","bytes":10485760,"sha256":"…"}
+{"p":"file.error","id":"…","reason":"offset|io|sha256|not_found","msg":"…"}
+{"p":"file.list.result","dir":"…","entries":[{"name":"a.zip","size":10,"is_dir":false,"mtime":1763700000}]}
+```
+
+规则（缺一条就会出现「传了一半的坏文件」）：
+
+1. **id 由发起方生成**，`f-<毫秒>-<4位随机>`。**发起方决定数据方向**，接收方只按 id 回，
+   绝不靠 `dir` 字段猜方向——下载方向 agent 发 `file.chunk`，上传方向控制端发，
+   帧格式相同，只有 id 的发起方能区分。
+2. **块必须按 `off` 升序到达**。接收方发现 `off != 已写字节数` → `file.error`
+   reason=`offset`，发起方从 0 重传。v1 不做乱序重排与块级重传（复杂度不值）。
+3. **续传**：重连后 `file.offer` 带 `offset`。Agent 若 `size(目标) == offset` →
+   `mode:"append"` 从 offset 续写；否则 `mode:"new"` 从 0 开始（并截断旧文件）。
+4. **冲突改名**：目标已存在 → 默认 `a (1).zip`、`a (2).zip`…，`mode:"rename"`，
+   回包 `path` 是**真实落盘路径**，控制端要按它显示。覆盖需显式 `overwrite:true`
+   （首版不开放 UI）。
+5. **落盘安全（Agent 强制，不是可选项）**：文件传输是最容易被拿来写任意文件的入口。
+   只取 basename、拒绝 `..`、拒绝绝对路径、滤掉 Windows 保留字符 `<>:"|?*` 与结尾点/空格、
+   长度 ≤200 字符；最终路径必须落在接收目录内（`realpath` 前缀校验），
+   越界一律 `file.reject` reason=`bad_name`。
+6. **容量**：单文件上限默认 4GiB；接收目录剩余空间 < 1.2×size → `file.reject` `no_space`。
+7. **进度节流**：`file.progress` 每 ≥1MiB 或 ≥500ms 才发一次，否则一条 10GB 传输
+   能刷出 30 万条消息，把信令挤爆。
+8. `file.list` / `file.get` 的浏览范围 = **接收目录 + 用户主目录**两个白名单根
+   （`realpath` 后拼分隔符比较前缀，挡住 `/tmp/a` 匹配 `/tmp/ab` 这类经典漏法）。
+   系统目录（`/etc`、`/System`、`/var`、`/usr`）与其它用户一律拒绝，回 `file.error reason:"denied"`。
+   > 为什么允许主目录：下载方向的本意就是「把被控端的文件拿过来」，只允许接收目录
+   > 等于只能下载自己刚上传的文件，功能等于没有。而 agent 本来就已经接受全量
+   > 键鼠注入与关机指令，信任模型上「读主目录内的文件」不是新增的信任边界。
+
+## 3. 鼠标模式 + 光标可见性
+
+```json
+→ {"p":"cursor","visible":false}
+← {"p":"cursor.state","visible":false,"ok":true,"engine":"win-show-cursor|mac-cgdisplay|unsupported"}
+→ {"p":"input","t":"moverel","dx":0.0021,"dy":-0.0004}
+```
+
+| 模式 | 官方名 | 行为 |
+|---|---|---|
+| `remote` | `ControlledMouse` | 绝对坐标 `input.move`，被控端系统光标可见。**默认**，兼容性最好 |
+| `control` | `ControlMouse` | 相对位移 `input.moverel`，被控端光标隐藏，控制端用本机光标指示位置 |
+| `auto` | `AutoMouse` | RTT 平滑 >60ms 或正在拖拽 → 临时切 `control`；条件消失后 2 秒回 `remote` |
+
+- `moverel` 的 `dx/dy` 是**归一化相对位移**（0.001 = 屏幕宽度的 0.1%），
+  Agent 侧换算成像素后走「warp」语义（macOS `CGWarpMouseCursorPosition`、
+  Windows `SetCursorPos`），**不吃系统指针加速**。这正是游戏场景要的。
+- 游戏模式 = `control` 下再乘一个 `speed`（0.5–3.0），不做平滑、不做加速曲线。
+- 切到 `remote` 必须**立刻**发 `cursor:visible:true`——否则被控端光标一直是隐藏的，
+  用户会以为鼠标坏了。
+- `engine:"unsupported"`（Linux X11 无统一 API）时控制端要隐藏「隐藏远端光标」这个选项，
+  而不是给一个点了没反应的开关。
+
+## 4. 键盘映射（外设组）
+
+只在**跨平台**时生效，同平台直通；映射在**控制端**做（Agent 只认 pyautogui 键名，
+两边都维护映射表必然对不上）：
+
+| 控制端 | 被控端 | 映射 | 备注 |
+|---|---|---|---|
+| macOS | Windows | `cmd` → `win`（默认）/ `ctrl`（可配） | 官方 `Setting.Keyboard.WindowsMapping.*` |
+| macOS | Windows | `option` → `alt`；`delete` → `backspace` | `fn+delete` → `delete` |
+| Windows | macOS | `win` → `cmd`；`alt` → `option` | |
+| Linux | 任意 | 直通 | |
+
+## 5. 验收
+
+- [ ] 双向各传一个 ≥100MB 文件，sha256 一致；中途断网重连后能续传
+- [ ] 文件名带 `../`、绝对路径、`CON`、超长名 → 被拒且不落盘
+- [ ] 同名文件第二次传 → 落成 `a (1).zip`，原文件不被覆盖
+- [ ] 磁盘不足 → `file.reject no_space`，不留半截文件
+- [ ] 鼠标三模式切换后远端光标可见性跟着变，切回 `remote` 光标必回来
+- [ ] Mac 控制端按 ⌘ 在 Windows 被控端表现为 Win 键（可配成 Ctrl）
+
+## 6. 控制端麦克风（Agent 侧放音）
+
+方向与 v2 §1 相反：**控制端采集 → 被控端播放**。官方叫「语音通话」，我们只做单向，
+理由见下。
+
+### 6.1 为什么是单向而不是双向通话
+
+v2 §1 已经有一条 Agent → 控制端的音频轨（被控端麦克风/系统输入）。如果再补一条反方向，
+同一个 `RTCPeerConnection` 上就有两条音频 m-line，语义变成「双向通话」——那时候必须处理
+回声消除（AEC）、双讲（double-talk）、以及「两端都在放音时谁压谁」，这些是实时音频工程，
+不是远控该背的复杂度。
+
+所以这里只做**控制端 → 被控端的单向推送**定位为「对被控端喊话」。控制端这边
+`getUserMedia` 必须显式开 `echoCancellation: true` + `noiseSuppression: true`：
+控制端自己的扬声器正在放被控端的声音，不开 AEC 会形成回授啸叫。
+
+### 6.2 消息
+
+```json
+// 控制端 → Agent：开/关喊话
+{"p":"mic", "enable": true}
+// Agent → 控制端：能力与状态回执
+{"p":"mic.state", "ok": true, "on": true, "engine": "aiortc", "err": null}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `ok` | 本次切换是否被接受。`false` 时 `err` 给原因码 |
+| `on` | 切换**之后**的实际状态（不是请求值）。控制端以它为准 |
+| `engine` | `aiortc` = 走 WebRTC 音频轨；`unsupported` = 本平台无放音能力 |
+| `err` | `no_audio` / `no_track` / `unsupported` / `busy`（**预留，当前 Agent 不会返回**：多控制端抢麦克风的产品规则还没定，先留词表避免以后改协议） |
+
+### 6.3 `agent.hello` 新增字段
+
+```json
+{"p":"agent.hello", "mic": true}
+```
+
+`mic` = 本会话**能否**接收控制端麦克风（即 Agent 有可用的音频输出设备且支持播放）。
+缺省视为 `false`：老 Agent 不会发这个字段，控制端据此把「麦克风」按钮置灰并说明原因，
+而不是给一个点了没反应的开关。
+
+### 6.4 协商方式：**不重协商**
+
+这是本节最关键的一条。控制端在 `createOffer` 阶段就加一条 **`sendrecv` 的 audio m-line**，
+但**不挂本地轨**（`addTransceiver(audio, sendrecv)` 后不 `addTrack`）。
+
+- 为什么不用 `recvonly`：`recvonly` 的 m-line 之后要变成 `sendonly` 必须重新协商
+  （re-offer），而 Agent 的 `handle_offer` 对同 peer 的策略是**先关旧会话再重建**
+  （见 `agent/webrtc_media.py handle_offer`）——那会把画面也一起重建，用户看到黑屏闪一下。
+- 为什么不在开麦时才 re-offer：同上。用 `sendrecv` 预留双向能力，开麦只是
+  `pc.getSenders()` 里给那条 audio sender `replaceTrack(localMic)`，**零协商、零中断**。
+- 代价：m-line 一直在，即使从没开过麦。空 `sendrecv` 不产生 RTP 包，带宽代价为 0。
+
+Agent 侧对应地：`handle_offer` 里如果 SDP 有 `m=audio`，先 `pc.on("track")` 注册接收，
+收到的 `RemoteAudioTrack` 交给 `pyaudio`/`sounddevice` 播放。**不 `addTrack`**——
+Agent 自己的麦克风轨仍然只在 `audio_ok` 且 SDP 有 m=audio 时挂（v2 §1 的行为不变）。
+
+### 6.5 强制规则
+
+1. 开麦前必须先 `getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}})`，
+   **拿不到就立刻回 `mic.state{ok:false,err:"no_track"}` 并让按钮弹回 OFF**，
+   绝不允许「按钮亮着但没声音」。
+2. 关麦时必须 `track.stop()` 释放采集设备——否则系统状态栏的麦克风指示灯会一直亮，
+   用户会以为被偷听。
+3. 页面退出 / 断链 / 切到 JPEG 通路时**必须**自动关麦（同规则 2）。
+4. `mic.state` 是唯一真相源：控制端点了开关后进入「pending」态，收到回执才定态；
+   3 秒没回执视为失败并弹回。
+5. 被控端**必须在本地有可见提示**（正在被喊话），不做静默放音。这一条是产品红线，
+   与防窥功能同级的隐私要求。
+6. JPEG 通路不支持麦克风（没有 RTP 通路），`p:"mic"` 发过去 Agent 应回
+   `ok:false, err:"unsupported"`。
+
+### 6.6 验收
+
+- [ ] 控制端开麦 → 被控端扬声器出声，延迟 < 300ms
+- [ ] 开麦/关麦切换**不触发**任何 `rtc.offer`（抓包确认零重协商）
+- [ ] 关麦后系统麦克风指示灯熄灭，`track.stop()` 已调用
+- [ ] 拒绝麦克风权限 → 按钮弹回 OFF 并提示，不进入「亮着但没声音」的假状态
+- [ ] 断链后重新连接，麦克风是 OFF（不记忆上次状态）
+- [ ] 老 Agent（hello 无 `mic`）→ 按钮置灰，提示「被控端不支持语音」

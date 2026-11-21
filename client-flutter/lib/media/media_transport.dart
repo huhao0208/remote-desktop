@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:material_ui/material_ui.dart';
 
+import '../core/mic_switch.dart';
 import '../core/models.dart';
 import '../signaling/signaling_client.dart';
 
@@ -113,6 +114,24 @@ abstract class MediaTransport {
 
   /// 本地静音（只改本机音量，**不通知 Agent**，协议 v2 §1）。
   Future<void> setAudioMuted(bool muted) async {}
+
+  /// 本通路能否推麦克风（协议 v3 §6）。JPEG 通路恒为 false：没有 RTP 通路可挂。
+  bool get canSendMic => false;
+
+  /// 打开本地麦克风并推到被控端。
+  ///
+  /// 返回 null = 成功；否则是失败原因（[MicError]）。**不抛异常**：
+  /// 调用方（页面）拿到错误码后弹回开关，异常穿透只会静默失败。
+  ///
+  /// 实现必须满足协议 §6.5：`echoCancellation + noiseSuppression` 必开
+  /// （控制端扬声器正在放被控端的声音，不开会啸叫）；拿不到音轨就返回错误，
+  /// 绝不允许「开关亮着但没声音」。
+  Future<MicError?> enableMic() async => MicError.unsupported;
+
+  /// 关闭麦克风并 `track.stop()` 释放设备。
+  ///
+  /// 必须真的 stop：否则系统状态栏的麦克风指示灯会一直亮，用户会以为被偷听。
+  Future<void> disableMic() async {}
 
   Future<void> start({
     required AgentHello hello,

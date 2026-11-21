@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- 协议 v3 §6：控制端麦克风。不声明的话 getusermedia 直接抛错，
+	     「语音」按钮会永远弹回 OFF（且系统不弹授权框，用户完全不知道原因）。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>开启语音后，把您的声音传到被控端电脑的扬声器，用于远程协助时通话。</string>
 </dict>
 </plist>

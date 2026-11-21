@@ -1,21 +1,28 @@
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode;
-import 'dart:io' show Platform;
+import 'dart:io' show Directory, File, Platform;
 import 'dart:math' as math;
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../core/api_client.dart';
 import '../core/app_config.dart';
 import '../core/clipboard_sync.dart';
 import '../core/connect_stage.dart';
+import '../core/file_transfer.dart';
+import '../core/file_transfer_model.dart';
 import '../core/input_events.dart';
+import '../core/key_mapping.dart';
+import '../core/mic_switch.dart';
 import '../core/mini_window.dart';
 import '../core/models.dart';
+import '../core/mouse_mode.dart';
 import '../core/reconnect_policy.dart';
 import '../core/security.dart';
 import '../core/settings.dart';
@@ -29,7 +36,10 @@ import '../media/media_transport.dart';
 import '../media/webrtc_transport.dart';
 import '../signaling/signaling_client.dart';
 import '../widgets/annotation_layer.dart';
+import '../widgets/file_transfer_panel.dart';
 import '../widgets/mini_window_panel.dart';
+import '../widgets/mouse_panel.dart';
+import '../widgets/peripheral_panel.dart';
 import '../widgets/quality_panel.dart';
 import '../widgets/power_panel.dart';
 import '../widgets/remote_info_panel.dart';
@@ -161,6 +171,10 @@ class _RemotePageState extends State<RemotePage> {
   bool _audioAvailable = false;
   bool _audioMuted = false;
 
+  /// 控制端麦克风（协议 v3 §6）。开关态由 `mic.state` 回执决定，不由点击决定。
+  final MicSwitch _mic = MicSwitch();
+  Timer? _micAckTimer;
+
   final FocusNode _focusNode = FocusNode(debugLabel: 'remote-keyboard');
   final Set<String> _heldMods = <String>{};
 
@@ -172,6 +186,43 @@ class _RemotePageState extends State<RemotePage> {
   Offset? _lastSent;
   DateTime _lastSentAt = DateTime.fromMillisecondsSinceEpoch(0);
   Size _screen = const Size(1920, 1080);
+
+  // ---- 协议 v3：鼠标模式 / 键位映射 / 文件传输 -------------------------
+
+  /// 鼠标三模式 + 游戏模式速度（协议 v3 §3）。落盘见 `Settings.mouseSettingsJson`。
+  MouseSettings _mouse = const MouseSettings();
+
+  /// 当前**实际生效**的模式：`auto` 会被 [AutoMousePolicy] 解析成 remote/control。
+  MouseMode _effectiveMouse = MouseMode.remote;
+
+  /// 智能鼠标的滞回判定（RTT 高或拖拽时切相对位移）。
+  final AutoMousePolicy _autoMouse = AutoMousePolicy();
+
+  /// 相对位移模式下的远端光标位置（归一化）。点按时用它算坐标。
+  final RelativeCursor _relCursor = RelativeCursor();
+
+  /// 主控端鼠标模式下上一拍本机指针位置：相对位移由「本机指针走了多少」得出。
+  Offset? _lastLocalPointer;
+
+  /// 跨平台键位映射（协议 v3 §4，外设组）。
+  KeyMappingConfig _keyMap = const KeyMappingConfig();
+
+  /// 上次切到 control 的时刻。策略的滞回窗口要靠它算「已经过了多久」——
+  /// 传固定 0 会让每次 tick 都被判成「刚切过」，永远回不到 remote。
+  DateTime? _autoMouseSwitchedAt;
+
+  /// 已下发的光标可见性（true = 已让被控端隐藏）。避免每秒重复发同一条。
+  bool _cursorHidden = false;
+
+  /// 本机 OS（归一化后的字符串），懒初始化一次。
+  String _localOs = '';
+
+  /// 文件传输（协议 v3 §2）。连接建立后创建，断链销毁。
+  FileTransferService? _files;
+  Timer? _filePump;
+  bool _filePanelOpen = false;
+  String _localReceiveDir = '';
+  String _remoteOs = '';
 
   /// 多屏（协议 v2 §3）：Agent 推的显示器列表 + 当前屏 id。
   /// 老 Agent 不发 `screens` → 列表为空，工具栏不显示切屏入口。
@@ -192,6 +243,10 @@ class _RemotePageState extends State<RemotePage> {
     _clip.enabled = Settings.clipboardSync;
     _shortcuts = ShortcutMap.fromJson(_jsonObject(Settings.shortcutsJson));
     _mini = MiniWindowState.fromJson(_jsonObject(Settings.miniWindowJson));
+    _mouse = MouseSettings.fromJson(_jsonObject(Settings.mouseSettingsJson) ?? const <String, dynamic>{});
+    _keyMap = KeyMappingConfig.fromJson(_jsonObject(Settings.keyMappingJson) ?? const <String, dynamic>{});
+    _effectiveMouse = _mouse.mode == MouseMode.auto ? MouseMode.remote : _mouse.mode;
+    unawaited(_initReceiveDir());
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
     _connect();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -217,7 +272,9 @@ class _RemotePageState extends State<RemotePage> {
     final SignalingClient? signaling = _signaling;
     if (signaling != null && signaling.isOpen) {
       for (final String mod in _heldMods) {
-        signaling.sendJson(InputEvent.keyUp(mod));
+        // 与 keydown 对称：_heldMods 存原词，发出去的要过映射，
+        // 否则 Mac 控制端按着 ⌘ 切走时，远端的 Win 键会一直卡着。
+        signaling.sendJson(InputEvent.keyUp(_mapKey(mod)));
       }
     }
     _heldMods.clear();
@@ -232,13 +289,29 @@ class _RemotePageState extends State<RemotePage> {
     _reconnectTimer?.cancel();
     _msgSub?.cancel();
     _frameSub?.cancel();
+    // 文件通道：先停定时器再 dispose 服务。反过来的话，定时器可能在
+    // dispose 已经清空 _uploads 之后再调一次 pump（此时 revision 已 dispose，
+    // 一旦有状态变更就会往已销毁的 Notifier 上写）。
+    // 麦克风：定时器 + 采集设备都要停。unawaited 是因为 dispose 是同步的，
+    // 但 disableMic 内部只做 stop()/replaceTrack(null)，不依赖后续 setState。
+    _micAckTimer?.cancel();
+    _micAckTimer = null;
+    unawaited(_transport?.disableMic() ?? Future<void>.value());
+    _filePump?.cancel();
+    _filePump = null;
+    final FileTransferService? files = _files;
+    _files = null;
+    if (files != null) {
+      files.revision.removeListener(_onFileRevision);
+      unawaited(files.dispose());
+    }
     _releaseHeldMods();
     // 退出页面时若仍在全屏，恢复窗口，避免把整个 App 卡在全屏
     if (_fullscreen) _setFullscreen(false);
     _statsListenable?.removeListener(_onStats);
     _statsListenable = null;
     _transport?.dispose();
-    _signaling?.close();
+    unawaited(_signaling?.close() ?? Future<void>.value());
     _api.close();
     _focusNode.dispose();
     _securityVN.dispose();
@@ -328,6 +401,10 @@ class _RemotePageState extends State<RemotePage> {
     _stats = const TransportStats();
     _audioAvailable = false;
     _audioMuted = false;
+    // 协议 v3 §6.6：断链必须关麦并归位。**必须在 dispose transport 之前**——
+    // disableMic 需要 transceiver/sender，transport 没了就只剩一个还亮着的
+    // 系统麦克风指示灯。
+    await _resetMic();
     await _transport?.dispose();
     _transport = null;
     await _signaling?.close();
@@ -429,7 +506,33 @@ class _RemotePageState extends State<RemotePage> {
         }
       case 'agent.error':
         _onAgentError(message['err']);
+      case 'mic.state':
+        // 协议 v3 §6：语音开关的唯一真相源（按钮亮不亮看它，不看点击）
+        _onMicState(message);
+        break;
+      case 'cursor.state':
+        // 被控端回执：不支持时把模式退回 remote，别让用户停在一个假的「已切换」上
+        if (message['ok'] == false) {
+          _toast('被控端无法隐藏系统光标，已退回「使用被控端鼠标」');
+          if (mounted) {
+            setState(() {
+              _mouse = _mouse.copyWith(mode: MouseMode.remote);
+              _effectiveMouse = MouseMode.remote;
+            });
+            _cursorHidden = false;
+            unawaited(Settings.setMouseSettingsJson(jsonEncode(_mouse.toJson())));
+          }
+        }
       default:
+        // 协议 v3 §2：文件通道的消息交给服务自己消费，绝不能再往下当 input 处理。
+        // 放在 default 里是有意的——文件消息有十来种 p，逐个写 case 只会越写越乱。
+        if (FileProtocol.isFileMessage(message)) {
+          final FileTransferService? files = _files;
+          if (files != null && files.handle(message)) {
+            if (mounted && _filePanelOpen) setState(() {});
+            return;
+          }
+        }
         break;
     }
   }
@@ -602,6 +705,23 @@ class _RemotePageState extends State<RemotePage> {
     // 必须由控制端显式打开，否则永远收不到 `dir:"down"`。
     // 放在早退之前：复用 transport 的重连路径也要重新对齐开关态。
     _send(InputEvent.clipSync(_clip.enabled));
+
+    // 协议 v3 §3：新会话要重新对齐光标可见性。被控端可能继承了上一个会话
+    // 隐藏光标的状态（异常断链时 restore 没跑到），这里按当前模式纠正一次。
+    _syncRemoteCursor(force: true);
+
+    // 协议 v2 §6：文件通道建在信令 WS 上，与画面通路无关——所以放在 transport
+    // 早退之前。否则「只有被控端重发 hello（比如换了分辨率）」时通道不会重建，
+    // 但如果是重连，旧 service 里的任务早已随旧 WS 失效，必须换新的。
+    if (hello.file) _ensureFileService();
+
+    // 协议 v3 §6：麦克风能力随 hello 走。**能力从有到无必须立刻关麦**，
+    // 否则重连到一台不支持的老 Agent 时，本地麦克风还在采集（指示灯亮着）。
+    _mic.setSupported(hello.mic && hello.isWebRtc);
+    if (!_mic.available && _micAckTimer != null) {
+      _micAckTimer?.cancel();
+      _micAckTimer = null;
+    }
 
     if (!needNewTransport && _transport != null) return;
     final RoomConfig? room = _room;
@@ -785,6 +905,7 @@ class _RemotePageState extends State<RemotePage> {
   }
 
   void _onTick() {
+    _tickAutoMouse();
     if (!mounted) return;
     // 音频轨到达是异步的（onTrack），跟 fps 一样按秒级刷新即可
     final bool audioReady = _transport?.hasAudio ?? false;
@@ -971,6 +1092,74 @@ class _RemotePageState extends State<RemotePage> {
     ));
   }
 
+  /// 打开鼠标设置面板（协议 v3 §3：三模式 + 游戏模式速度）。
+  void _openMousePanel() {
+    final AgentHello? hello = _hello;
+    unawaited(showMousePanel(
+      context,
+      settings: _mouse,
+      // 老 Agent 不发 cursor 字段 → cursorSupported 为 false → 面板把
+      // 「使用主控端鼠标」置灰并说明原因，而不是给一个点了没反应的选项
+      cursorSupported: hello?.cursorSupported ?? false,
+      onChanged: (MouseSettings next) => _applyMouseSettings(next),
+    ));
+  }
+
+  /// 打开外设面板（协议 v3 §4：跨平台键位映射）。
+  void _openPeripheralPanel() {
+    if (_localOs.isEmpty) _localOs = KeyMapper.normalizeOs(Platform.operatingSystem);
+    final String remote = KeyMapper.normalizeOs(_hello?.os ?? '');
+    if (remote.isNotEmpty) _remoteOs = remote;
+    unawaited(showPeripheralPanel(
+      context,
+      config: _keyMap,
+      localOs: _localOs,
+      remoteOs: _remoteOs,
+      onChanged: (KeyMappingConfig next) {
+        if (!mounted) return;
+        setState(() => _keyMap = next);
+        unawaited(Settings.setKeyMappingJson(jsonEncode(next.toJson())));
+      },
+    ));
+  }
+
+  /// 打开文件传输面板。传输本身不依赖面板可见性——收起面板不影响传输进度。
+  void _openFilePanel() {
+    final FileTransferService? service = _files;
+    if (service == null) {
+      _toast('文件通道尚未就绪，请稍候重试');
+      return;
+    }
+    unawaited(showFileTransferPanel(
+      context,
+      tasks: service.tasks,
+      // 传服务自己的 revision：dialog 是独立路由，宿主页的 setState 重建不到它，
+      // 只给快照的话进度条会一直是打开那一刻的样子。
+      revision: service.revision,
+      receiveDir: _localReceiveDir,
+      supported: _hello?.file ?? false,
+      onSend: () => unawaited(_pickAndSendFiles()),
+      onRetry: (FileTask task) {
+        // 重试 = 用同一路径重新发起（下载方向有 savePath 语义，
+        // 上传方向原始 File 已随任务结束释放，这里只重开下载）
+        final String? path = task.savePath;
+        if (path != null && path.isNotEmpty && task.direction == FileDirection.download) {
+          service.requestDownload(path);
+        }
+      },
+      onCancel: (FileTask task) => service.cancel(task.id),
+      onClearFinished: () {
+        service.tasks.removeWhere((FileTask t) => t.finished);
+        if (mounted) setState(() {});
+      },
+      onPickDir: () => unawaited(_pickReceiveDir()),
+      onVisibility: (bool open) {
+        if (!mounted || _filePanelOpen == open) return;
+        setState(() => _filePanelOpen = open);
+      },
+    ));
+  }
+
   /// 打开小窗设置面板（置顶/透明度/尺寸/退出）。
   void _openMiniWindowPanel() {
     unawaited(showMiniWindowPanel(
@@ -1097,6 +1286,292 @@ class _RemotePageState extends State<RemotePage> {
     signaling.sendJson(event);
   }
 
+  // ---------------------------------------------------- 协议 v3：控制端麦克风
+
+  /// 点麦克风按钮。**只推进状态机 + 发请求**，界面上的开关态等回执再定。
+  ///
+  /// 为什么不在点击后立刻 `setState(on)`：Agent 可能因为没扬声器 / 被占用而拒绝，
+  /// 「按钮亮着但没声音」是最糟的体验。协议 §6.5 规则 4 要求以 `mic.state` 为准。
+  Future<void> _toggleMic() async {
+    if (!_mic.canToggle) {
+      // pending 期间连点会产生一串 mic 消息，两端状态取决于到达顺序，不可预测
+      if (_mic.isPending) _toast('正在切换语音，请稍候');
+      return;
+    }
+    final MediaTransport? transport = _transport;
+    if (transport == null || !transport.canSendMic) {
+      _toast(describeMicError(MicError.unsupported));
+      return;
+    }
+
+    final bool wantOn = _mic.nextIntent;
+    if (wantOn) {
+      setState(() => _mic.markOnRequested());
+      // 先在本地拿音轨：拿不到就不用发请求了，直接弹回并说明是权限问题
+      final MicError? err = await transport.enableMic();
+      if (!mounted) return;
+      if (err != null) {
+        setState(() => _mic.fail(err));
+        _toast(describeMicError(err));
+        return;
+      }
+      _send(<String, dynamic>{'p': 'mic', 'enable': true});
+    } else {
+      setState(() => _mic.markOffRequested());
+      _send(<String, dynamic>{'p': 'mic', 'enable': false});
+      // 关麦不必等回执就先停采集：设备指示灯应立刻灭，
+      // 万一 Agent 没回执，本地也已经停了（协议 §6.5 规则 2 的意图）
+      await transport.disableMic();
+      if (!mounted) return;
+    }
+    _armMicAck(transport);
+  }
+
+  /// 麦克风按钮的 tooltip。把「正在切换」和「当前状态」说清楚，
+  /// 否则用户点了看不到反馈会连点。
+  String _micPendingTooltip() {
+    if (_mic.isPending) return '正在切换语音…';
+    if (_mic.isOn) return '点击结束语音（被控端会停止播放你的声音）';
+    final String err = describeMicError(_mic.error);
+    if (err.isNotEmpty) return err;
+    return '开始语音：把你的麦克风声音放到被控端扬声器';
+  }
+
+  /// 3 秒内没收到 `mic.state` 就弹回并提示（协议 §6.5 规则 4）。
+  void _armMicAck(MediaTransport transport) {
+    _micAckTimer?.cancel();
+    _micAckTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted || !_mic.expire()) return;
+      setState(() {});
+      // 超时后本地必须真的停：不能停在「以为开着」
+      if (!_mic.isOn) unawaited(transport.disableMic());
+      _toast(describeMicError(_mic.error));
+    });
+  }
+
+  /// 收到 `mic.state` 回执。
+  void _onMicState(Map<String, dynamic> message) {
+    _micAckTimer?.cancel();
+    _micAckTimer = null;
+    final bool ok = message['ok'] == true;
+    final bool on = message['on'] == true;
+    if (!mounted) return;
+    setState(() => _mic.confirm(on: on, ok: ok, err: message['err']));
+    if (!ok) {
+      final String text = describeMicError(_mic.error);
+      if (text.isNotEmpty) _toast(text);
+      // Agent 拒绝了但本地音轨已开 → 立刻释放，避免麦克风指示灯亮着
+      if (!_mic.isOn) unawaited(_transport?.disableMic() ?? Future<void>.value());
+    }
+  }
+
+  /// 断链/退出时强制关麦并归位（协议 §6.6：重连后必须是 OFF）。
+  Future<void> _resetMic() async {
+    _micAckTimer?.cancel();
+    _micAckTimer = null;
+    if (mounted) {
+      setState(() => _mic.reset());
+    } else {
+      _mic.reset();
+    }
+    await _transport?.disableMic();
+  }
+
+  // ---------------------------------------------------- 协议 v3：鼠标模式
+
+  /// 把当前模式的变化同步给被控端（光标可见性跟着模式走，协议 v3 §3）。
+  ///
+  /// [force] 用于新会话：即使模式没变也要发一次，因为被控端可能继承了
+  /// 上一个会话隐藏光标的状态。
+  /// 切回 `remote` 必须**立刻**让光标回来，否则远端光标一直藏着，用户会
+  /// 以为鼠标坏了——这条比「省一条消息」重要得多。
+  void _syncRemoteCursor({bool force = false}) {
+    final bool hide = _effectiveMouse == MouseMode.control;
+    if (!force && hide == _cursorHidden) return;
+    _cursorHidden = hide;
+    final AgentHello? hello = _hello;
+    // 老 Agent / Linux 被控端不支持：发过去只会换回一个 ok:false，不如不发
+    if (hello != null && !hello.cursorSupported) return;
+    _send(InputEvent.cursor(!hide));
+  }
+
+  void _applyMouseSettings(MouseSettings next, {bool persist = true}) {
+    setState(() {
+      _mouse = next;
+      _effectiveMouse = next.mode == MouseMode.auto ? _autoMouse.current : next.mode;
+    });
+    if (persist) unawaited(Settings.setMouseSettingsJson(jsonEncode(next.toJson())));
+    _syncRemoteCursor();
+    if (next.mode != MouseMode.control) {
+      // 回绝对坐标模式要重置相对游标：否则下次切回来时位置是上次的残留
+      _relCursor.reset();
+      _lastLocalPointer = null;
+    }
+    _toast('鼠标模式：${next.mode.label}');
+  }
+
+  /// 智能鼠标：每秒随 HUD 一起评估一次，只在真正变模式时下发。
+  void _tickAutoMouse() {
+    if (_mouse.mode != MouseMode.auto) return;
+    // rttMs 只在 WebRTC 通路上有值（JPEG 直连拿不到 ICE 统计），为空就退回
+    // 应用层量到的信令往返。两者都没有时给 0，AutoMousePolicy 会把 0 当「未采样」
+    // 按 remote 处理，而不是误判成「延迟极低」。
+    final int? rawRtt = _stats.rttMs;
+    final double rtt = (rawRtt != null && rawRtt > 0)
+        ? rawRtt.toDouble()
+        : _latency.inMilliseconds.toDouble();
+    final DateTime? switchedAt = _autoMouseSwitchedAt;
+    final MouseMode next = _autoMouse.decide(
+      rttMs: rtt,
+      dragging: _downAt != null,
+      since: switchedAt == null
+          ? const Duration(days: 1) // 还没切过 → 视为早已超过滞回窗口
+          : DateTime.now().difference(switchedAt),
+    );
+    if (next == _effectiveMouse) return;
+    _autoMouseSwitchedAt = next == MouseMode.control ? DateTime.now() : null;
+    setState(() {
+      _effectiveMouse = next;
+      if (next == MouseMode.remote) {
+        // 回绝对坐标前把相对游标归位，否则下次进来位置是上次的残留
+        _relCursor.reset();
+        _lastLocalPointer = null;
+      }
+    });
+    _syncRemoteCursor();
+  }
+
+  /// 相对位移：本机指针这一拍走了多少，就发多少（协议 v3 §3 的 `input.moverel`）。
+  ///
+  /// 为什么不用绝对坐标换算差值：窗口缩放过之后，视口上的 1px 不等于远端 1px，
+  /// 而相对位移的语义就是「我手移了多少」，交给被控端自己按屏幕比例换算最稳。
+  void _sendRelativeMove(Offset local, Size box) {
+    final Offset? last = _lastLocalPointer;
+    _lastLocalPointer = local;
+    if (last == null || box.isEmpty) return;
+    final double dx = (local.dx - last.dx) / box.width;
+    final double dy = (local.dy - last.dy) / box.height;
+    if (dx == 0 && dy == 0) return;
+    final ({double dx, double dy}) moved = _relCursor.moveBy(
+      dx,
+      dy,
+      speed: _mouse.effectiveSpeed,
+    );
+    if (moved.dx == 0 && moved.dy == 0) return;
+    _send(InputEvent.moveRel(moved.dx, moved.dy));
+  }
+
+  // ---------------------------------------------------- 协议 v3：键位映射
+
+  /// 跨平台键位映射（协议 v3 §4）。非跨平台直接原样返回，零开销。
+  String _mapKey(String key) {
+    final AgentHello? hello = _hello;
+    if (hello == null) return key;
+    if (_localOs.isEmpty) _localOs = KeyMapper.normalizeOs(Platform.operatingSystem);
+    _remoteOs = KeyMapper.normalizeOs(hello.os);
+    if (!KeyMapper.isCrossPlatform(_localOs, _remoteOs)) return key;
+    return KeyMapper.mapKey(key, localOs: _localOs, remoteOs: _remoteOs, config: _keyMap);
+  }
+
+  // ---------------------------------------------------- 协议 v3：文件传输
+
+  Future<void> _initReceiveDir() async {
+    final String saved = Settings.receiveDir;
+    if (saved.isNotEmpty) {
+      if (mounted) setState(() => _localReceiveDir = saved);
+      return;
+    }
+    try {
+      final Directory base = await getDownloadsDirectory() ??
+          await getApplicationDocumentsDirectory();
+      final String dir = '${base.path}${Platform.pathSeparator}UU Remote';
+      await Directory(dir).create(recursive: true);
+      if (mounted) setState(() => _localReceiveDir = dir);
+    } catch (_) {
+      // 桌面端拿不到下载目录（沙箱/权限）→ 退回临时目录，功能降级但可用
+      try {
+        final Directory tmp = Directory.systemTemp.createTempSync('uu_recv_');
+        if (mounted) setState(() => _localReceiveDir = tmp.path);
+      } catch (_) {
+        if (mounted) setState(() => _localReceiveDir = '');
+      }
+    }
+  }
+
+  /// 连接就绪后建文件通道。整个页面生命周期只建一次：服务里的 `send` 闭包
+  /// 指向的是 `this._send`（每次调用时才取当前 `_signaling`），所以重连后
+  /// 帧会自动走新 WS，不需要重建服务——重建反而会丢掉用户排队的任务列表。
+  void _ensureFileService() {
+    if (_files != null) return;
+    final FileTransferService service = FileTransferService(
+      send: _send,
+      receiveDir: () async {
+        final String dir = _localReceiveDir;
+        if (dir.isEmpty) throw StateError('本机接收目录不可用');
+        return Directory(dir);
+      },
+    );
+    service.revision.addListener(_onFileRevision);
+    _files = service;
+    // 16ms 一拍：和 60fps 的画面同频，块发得动又不会把事件循环饿死。
+    _filePump = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      final FileTransferService? s = _files;
+      if (s == null) return;
+      // 没有任务在跑就不空转排队：pump 自己会判 busy
+      unawaited(s.pump());
+      if (_filePanelOpen && mounted) setState(() {});
+    });
+  }
+
+  /// 面板关着的时候也要让菜单上的「传输中」角标跟着变。
+  /// 面板开着时交给 16ms 的 pump 定时器统一驱动，避免同一帧重建两次。
+  void _onFileRevision() {
+    if (!mounted || _filePanelOpen) return;
+    setState(() {});
+  }
+
+  Future<void> _pickAndSendFiles() async {
+    final AgentHello? hello = _hello;
+    if (hello == null || !hello.file) {
+      _toast('被控端不支持文件传输，请升级被控端 Agent');
+      return;
+    }
+    final FileTransferService? service = _files;
+    if (service == null) {
+      _toast('文件通道尚未就绪，请稍候重试');
+      return;
+    }
+    try {
+      final List<XFile> picked = await openFiles(confirmButtonText: '发送');
+      if (picked.isEmpty) return;
+      // XFile → File：桌面端 path 一定有效；移动端若为 null 则跳过
+      final List<File> files = <File>[];
+      for (final XFile f in picked) {
+        if (f.path.isNotEmpty) files.add(File(f.path));
+      }
+      if (files.isEmpty) {
+        _toast('无法读取所选文件');
+        return;
+      }
+      await service.send(files);
+      if (mounted) setState(() {}); // 立刻把新任务画出来
+    } catch (e) {
+      _toast('选择文件失败：$e');
+    }
+  }
+
+  Future<void> _pickReceiveDir() async {
+    try {
+      final String? dir = await getDirectoryPath(confirmButtonText: '选择此目录');
+      if (dir == null || dir.isEmpty) return;
+      await Settings.setReceiveDir(dir);
+      if (mounted) setState(() => _localReceiveDir = dir);
+      _toast('接收目录已改为 $dir');
+    } catch (e) {
+      _toast('无法选择目录：$e');
+    }
+  }
+
   /// 屏幕坐标 → 协议归一化坐标（0..1），几何与 `BoxFit.contain` 完全一致。
   Offset _normalize(Offset local, Size box) {
     final Size screen = _screen;
@@ -1114,6 +1589,11 @@ class _RemotePageState extends State<RemotePage> {
   }
 
   void _sendMove(Offset local, Size box, {bool force = false}) {
+    // 协议 v3 §3：主控端鼠标模式走相对位移，绝对坐标那条路完全不发
+    if (_effectiveMouse == MouseMode.control) {
+      _sendRelativeMove(local, box);
+      return;
+    }
     final DateTime now = DateTime.now();
     if (!force && now.difference(_lastSentAt) < AppConfig.inputThrottle) return;
     final Offset p = _normalize(local, box);
@@ -1124,6 +1604,15 @@ class _RemotePageState extends State<RemotePage> {
     _lastSent = p;
     _lastSentAt = now;
     _send(InputEvent.move(p.dx, p.dy));
+  }
+
+  /// 当前该用的「远端坐标」。相对位移模式下没有绝对坐标，只能拿本地累加的
+  /// 归一化位置——不这么做的话，「主控端鼠标」模式里点按会全落在左上角。
+  Offset _remotePoint(Offset local, Size box) {
+    if (_effectiveMouse == MouseMode.control) {
+      return Offset(_relCursor.x, _relCursor.y);
+    }
+    return _normalize(local, box);
   }
 
   void _onPointerDown(PointerDownEvent event, Size box) {
@@ -1151,7 +1640,7 @@ class _RemotePageState extends State<RemotePage> {
     // 见 docs/远控复刻基线.md —— 这里先把三键跑通，侧键留 P2。
     final int buttons = event.buttons;
     if (buttons == kSecondaryMouseButton || buttons == kMiddleMouseButton) {
-      final Offset p = _normalize(event.localPosition, box);
+      final Offset p = _remotePoint(event.localPosition, box);
       _send(InputEvent.click(p.dx, p.dy, btn: buttons == kSecondaryMouseButton ? 'right' : 'middle'));
       return;
     }
@@ -1165,7 +1654,7 @@ class _RemotePageState extends State<RemotePage> {
     _longPress = Timer(const Duration(milliseconds: 550), () {
       final Offset? down = _downAt;
       if (!mounted || _dragged || down == null) return;
-      final Offset p = _normalize(down, box);
+      final Offset p = _remotePoint(down, box);
       _send(InputEvent.click(p.dx, p.dy, btn: 'right'));
       _longPressFired = true;
     });
@@ -1227,7 +1716,7 @@ class _RemotePageState extends State<RemotePage> {
     _dragged = false;
     _longPressFired = false;
     if (!isTap) return;
-    final Offset p = _normalize(event.localPosition, box);
+    final Offset p = _remotePoint(event.localPosition, box);
     _send(InputEvent.click(p.dx, p.dy));
   }
 
@@ -1390,7 +1879,9 @@ class _RemotePageState extends State<RemotePage> {
 
     if (event is KeyUpEvent) {
       final String? mod = RemoteKeyMapper.modifierName(event.logicalKey);
-      if (mod != null && _heldMods.remove(mod)) _send(InputEvent.keyUp(mod));
+      // keyUp 发**映射前**的名字：_heldMods 里存的是控制端词表的原词
+      // （见下面 keydown 分支），映射只影响发给被控端的那一份。
+      if (mod != null && _heldMods.remove(mod)) _send(InputEvent.keyUp(_mapKey(mod)));
       return;
     }
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return;
@@ -1398,7 +1889,9 @@ class _RemotePageState extends State<RemotePage> {
 
     final String? mod = RemoteKeyMapper.modifierName(event.logicalKey);
     if (mod != null) {
-      if (_heldMods.add(mod)) _send(InputEvent.keyDown(mod));
+      // 协议 v3 §4：跨平台按配置映射（Mac ⌘ → Win/Ctrl）。_heldMods 仍记原词，
+      // 否则 Mac 上按 ⌘ 记成 'win' 后，keyUp 拿 'win' 查不到，修饰键永远不释放。
+      if (_heldMods.add(mod)) _send(InputEvent.keyDown(_mapKey(mod)));
       return;
     }
 
@@ -1412,7 +1905,7 @@ class _RemotePageState extends State<RemotePage> {
       return;
     }
     final String? name = RemoteKeyMapper.keyName(event.logicalKey);
-    if (name != null) _send(InputEvent.press(name));
+    if (name != null) _send(InputEvent.press(_mapKey(name)));
   }
 
   // ------------------------------------------------------------ UI
@@ -1501,6 +1994,13 @@ class _RemotePageState extends State<RemotePage> {
           // 窄屏只留图标，省下的宽度给设备名；屏数与名称进 tooltip / 菜单
           _screenSelector(compact: !wide),
           _qualitySelector(compact: !wide),
+          // 单条工具栏合并（官方 B2 结构）：宽屏把「鼠标/外设/文件」三组亮出来，
+          // 窄屏（390px）塞不下 8 个控件，仍走「更多」菜单——硬塞必然把设备名挤没。
+          if (wide) ...<Widget>[
+            _mouseSelector(),
+            _peripheralSelector(),
+            _fileSelector(),
+          ],
           // 宽屏才把安全/电源/信息/全屏放顶栏；窄屏全部收进「更多」，
           // 否则 46px 高、390px 宽的条里塞 8 个控件必然互相挤压。
           if (wide) ...<Widget>[
@@ -1547,6 +2047,9 @@ class _RemotePageState extends State<RemotePage> {
               if (v == 'annotation') _toggleAnnotation();
               if (v == 'shortcuts') _openShortcuts();
               if (v == 'mini') _openMiniWindowPanel();
+              if (v == 'mouse') _openMousePanel();
+              if (v == 'peripheral') _openPeripheralPanel();
+              if (v == 'files') _openFilePanel();
               if (v == 'close') _confirmExit();
             },
             itemBuilder: (BuildContext ctx) => <PopupMenuEntry<String>>[
@@ -1600,6 +2103,45 @@ class _RemotePageState extends State<RemotePage> {
                     title: Text(_mini.enabled ? '退出小窗模式' : '小窗模式（置顶浮窗）'),
                   ),
                 ),
+              PopupMenuItem<String>(
+                value: 'mouse',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.mouse_outlined, size: 18),
+                  title: const Text('鼠标模式'),
+                  trailing: Text(
+                    _mouse.mode.label,
+                    style: const TextStyle(fontSize: 11, color: AppColors.videoMuted),
+                  ),
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'peripheral',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.keyboard_alt_outlined, size: 18),
+                  title: const Text('外设（键位映射）'),
+                ),
+              ),
+              PopupMenuItem<String>(
+                value: 'files',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    Icons.folder_outlined,
+                    size: 18,
+                    // 被控端不支持时用灰图标，点进去给一句升级提示而不是空面板
+                    color: (_hello?.file ?? false) ? null : AppColors.videoMuted,
+                  ),
+                  title: const Text('文件传输'),
+                  trailing: (_files?.busy ?? false)
+                      ? const StatusDot(color: AppColors.accent, size: 6)
+                      : null,
+                ),
+              ),
               const PopupMenuDivider(height: 1),
               PopupMenuItem<String>(
                 value: 'hud',
@@ -1777,6 +2319,10 @@ class _RemotePageState extends State<RemotePage> {
             icon: _audioMuted ? Icons.volume_off : Icons.volume_up,
             color: _audioMuted ? AppColors.videoMuted : AppColors.accentHover,
           ),
+        // 喊话是「被控端那边正在出声」的状态，必须显眼——用户看不到那边，
+        // 只能靠这个 chip 知道自己的声音正在被放出来
+        if (_mic.isOn)
+          const HudChip(text: '语音中', icon: Icons.mic, color: AppColors.warn),
       ];
     }
 
@@ -1909,31 +2455,86 @@ class _RemotePageState extends State<RemotePage> {
   ///
   /// [compact] 为窄屏形态：只显示档位名（「超清」），省掉「· 60fps」约 30px。
   Widget _qualitySelector({bool compact = false}) {
-    return InkWell(
+    return _chromePill(
+      icon: Icons.tune,
+      text: compact ? _quality.preset.label : _quality.label,
+      tooltip: '画质设置',
       onTap: _openQualityPanel,
-      borderRadius: BorderRadius.circular(AppRadius.sm),
-      child: Container(
-        height: 26,
-        margin: const EdgeInsets.symmetric(horizontal: AppSpace.xs),
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        decoration: BoxDecoration(
-          color: AppColors.videoBg,
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: AppColors.videoChromeBorder),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            const Icon(Icons.tune, size: 14, color: AppColors.videoMuted),
-            const SizedBox(width: 5),
-            Text(
-              compact ? _quality.preset.label : _quality.label,
-              style: const TextStyle(fontSize: 11, color: AppColors.videoText),
-            ),
-            const Icon(Icons.expand_more, size: 14, color: AppColors.videoMuted),
-          ],
+    );
+  }
+
+  /// 顶栏通用「药丸」选择器（画质/显示屏/外设/鼠标/文件 共用一套外观）。
+  ///
+  /// 抽出来的原因：单条工具栏合并后顶栏有 5 个同款入口，各写一遍 Container
+  /// 必然越写越歪（官方工具栏的视觉一致性就靠这个）。
+  Widget _chromePill({
+    required IconData icon,
+    required String text,
+    required String tooltip,
+    required VoidCallback onTap,
+    Widget? trailing,
+    Color? iconColor,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppRadius.sm),
+        child: Container(
+          height: 26,
+          margin: const EdgeInsets.symmetric(horizontal: AppSpace.xs),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: AppColors.videoBg,
+            borderRadius: BorderRadius.circular(AppRadius.sm),
+            border: Border.all(color: AppColors.videoChromeBorder),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(icon, size: 14, color: iconColor ?? AppColors.videoMuted),
+              const SizedBox(width: 5),
+              Text(text, style: const TextStyle(fontSize: 11, color: AppColors.videoText)),
+              if (trailing != null) ...<Widget>[const SizedBox(width: 4), trailing],
+              const SizedBox(width: 2),
+              const Icon(Icons.expand_more, size: 14, color: AppColors.videoMuted),
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  /// 顶栏鼠标入口（官方「鼠标▾」）：显示当前模式名，点开三模式面板。
+  Widget _mouseSelector() {
+    return _chromePill(
+      icon: Icons.mouse_outlined,
+      text: _mouse.mode.label,
+      tooltip: '鼠标模式：${_mouse.mode.hint}',
+      onTap: _openMousePanel,
+    );
+  }
+
+  /// 顶栏外设入口（官方「外设▾」）：跨平台键位映射。
+  Widget _peripheralSelector() {
+    return _chromePill(
+      icon: Icons.keyboard_alt_outlined,
+      text: '外设',
+      tooltip: '外设（键位映射）',
+      onTap: _openPeripheralPanel,
+    );
+  }
+
+  /// 顶栏文件入口（官方「文件」）：传输中有小圆点，一眼看到有任务在跑。
+  Widget _fileSelector() {
+    final bool busy = _files?.busy ?? false;
+    return _chromePill(
+      icon: Icons.folder_outlined,
+      text: '文件',
+      tooltip: busy ? '文件传输：有任务进行中' : '文件传输',
+      onTap: _openFilePanel,
+      iconColor: busy ? AppColors.accent : null,
+      trailing: busy ? const StatusDot(color: AppColors.accent, size: 6) : null,
     );
   }
 
@@ -1987,6 +2588,18 @@ class _RemotePageState extends State<RemotePage> {
                       tooltip: _audioMuted ? '点击开启被控端声音' : '静音（仅本机，不通知被控端）',
                       active: !_audioMuted,
                       onPressed: _toggleAudio,
+                    ),
+                  // 协议 v3 §6：控制端麦克风。_mic.available 为假（老 Agent / JPEG 通路）
+                  // 时整个按钮不出现——给一个点不动的麦克风只会让人以为功能坏了。
+                  if (_mic.available)
+                    ToolButton(
+                      icon: _mic.isPending
+                          ? Icons.hourglass_top
+                          : (_mic.isOn ? Icons.mic : Icons.mic_off),
+                      label: _mic.isOn ? '语音中' : '语音',
+                      tooltip: _micPendingTooltip(),
+                      active: _mic.isOn,
+                      onPressed: () => unawaited(_toggleMic()),
                     ),
                   ToolButton(
                     icon: Icons.content_paste,

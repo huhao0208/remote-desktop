@@ -57,11 +57,15 @@ try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.ag
     from .clipboard_sync import ClipboardSync
     from .screens import grab_screencapture, list_monitors
     from . import security
+    from . import file_transfer as file_xfer
+    from . import cursor as cursor_ctl
 except ImportError:
     from _version import VERSION as AGENT_VERSION
     from clipboard_sync import ClipboardSync
     from screens import grab_screencapture, list_monitors
     import security
+    import file_transfer as file_xfer
+    import cursor as cursor_ctl
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
@@ -69,6 +73,10 @@ FRAME_MAGIC = b"FRM1"
 # 最近一次收发报文的时间（秒）。自更新靠它判断「现在有没有人在用」——
 # 远控进行中重启 agent 会直接断链，所以只在空闲时替换。
 LAST_ACTIVITY = 0.0
+
+# 文件接收目录。main() 启动时按 --receive-dir 或平台默认值填上，
+# 会话内只读（改目录要重启 agent，避免传到一半换落点）。
+_RECV_DIR = ""
 
 
 def mark_activity() -> None:
@@ -243,6 +251,12 @@ def _init_input():
         try:
             if t == "move":
                 pyautogui.moveTo(x, y)
+            elif t == "moverel":
+                # 协议 v3 §3：相对位移（主控端鼠标 / 游戏模式）。用 warp 语义的
+                # moveRel——macOS 走 CGWarpMouseCursorPosition、Windows 走 SetCursorPos，
+                # 都不吃系统指针加速，所以手感是线性的。
+                pyautogui.moveRel(float(ev.get("dx", 0)) * sw,
+                                  float(ev.get("dy", 0)) * sh, duration=0)
             elif t == "down":
                 pyautogui.mouseDown(x, y, button=ev.get("btn", "left"))
             elif t == "up":
@@ -299,6 +313,74 @@ def _paste_text(text: str) -> None:
         pyautogui.hotkey("command", "v")
     else:
         pyautogui.typewrite(text)  # Linux 尽力而为
+
+
+# ---------------------------------------------------------------- 文件传输
+
+def default_receive_dir() -> str:
+    """接收目录：优先「下载/UU Remote」，退到 ~/.uu-agent/receive。
+
+    不直接把 ~/Downloads 当接收目录：用户下载区里几百个文件混在一起，
+    「接收完成」的提示就没人看得懂了。
+    """
+    home = Path(os.path.expanduser("~"))
+    for cand in (home / "Downloads" / "UU Remote", home / ".uu-agent" / "receive"):
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            return str(cand)
+        except Exception:  # noqa: BLE001  目录不可写就换下一个
+            continue
+    return str(Path.cwd())
+
+
+def recv_dir() -> str:
+    """当前生效的接收目录（未配置时取平台默认）。"""
+    return _RECV_DIR or default_receive_dir()
+
+
+def file_roots(receive_dir: str) -> list[str]:
+    """`file.get` / `file.list` 允许访问的根目录（白名单）。
+
+    为什么要带上「用户主目录」：下载方向的本意就是「把被控端的文件拿过来」，
+    只允许接收目录等于只能下载自己刚上传的文件，功能等于没有。
+    但系统目录与其它用户一律不在白名单：/etc、/System、/var、/usr 全挡住。
+    """
+    roots: list[str] = []
+    for raw in (receive_dir, os.path.expanduser("~")):
+        try:
+            roots.append(os.path.realpath(raw))
+        except Exception:  # noqa: BLE001
+            continue
+    return [r for r in roots if r]
+
+
+def _under_roots(path: str, roots: list[str]) -> bool:
+    """realpath 后是否落在某个根目录内。
+
+    必须拼 `os.sep` 再比较前缀，否则 `/tmp/a` 会匹配上 `/tmp/ab`
+    （这是路径校验最经典的漏法）。
+    """
+    try:
+        real = os.path.realpath(path)
+    except Exception:  # noqa: BLE001
+        return False
+    for r in roots:
+        if real == r or real.startswith(r + os.sep):
+            return True
+    return False
+
+
+def file_list(ev: dict, receive_dir: str) -> dict:
+    """`file.list`：空 dir 列接收目录，否则列白名单内的绝对路径/相对路径。"""
+    raw = str(ev.get("dir") or "").strip()
+    roots = file_roots(receive_dir)
+    if not raw:
+        return file_xfer.list_dir(receive_dir, "")
+    target = raw if os.path.isabs(raw) else os.path.join(receive_dir, raw)
+    if not _under_roots(target, roots):
+        return {"p": "file.error", "id": str(ev.get("id") or ""), "reason": "denied",
+                "msg": "只能浏览接收目录或用户主目录"}
+    return file_xfer.list_dir(os.path.realpath(target), "")
 
 
 # ---------------------------------------------------------------- 多显示器
@@ -570,12 +652,29 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
 
         media_kind = "webrtc" if rtc else "jpeg"
         audio_ok = bool(rtc and rtc.audio_ok)
+        # 协议 v3 §6：能否接收控制端麦克风（= 本机有可用扬声器 && 走 WebRTC）。
+        # 单独探测而不是复用 audio_ok：采集与放音是两台设备，用户可能只有其中一个。
+        try:
+            import audio_playback as _ap
+            mic_ok = bool(rtc) and _ap.available()
+            _mic_backend = _ap.backend() or "none"
+        except Exception:                                   # noqa: BLE001
+            mic_ok, _mic_backend = False, "none"
         print(f"[agent] media={media_kind} audio={'on' if audio_ok else 'off'} "
+              f"mic={'on' if mic_ok else 'off'}({_mic_backend}) "
               f"screens={len(screens)}", flush=True)
 
         # 剪贴板同步（轮询在后台，未 enable 时只空转）
         clips = ClipboardSync(send_json=send_json, log=print)
         clips.start()
+
+        # 文件传输（协议 v3 §2）：接收侧挂在**会话**上，断链即清掉半截 .part，
+        # 复用下个会话会把上一个会话的临时文件当成续传目标。
+        _recv = recv_dir()
+        file_rx = file_xfer.FileReceiver(_recv, log=lambda m: print(m, flush=True))
+        # 下载方向每条任务一个 FileSender（各自的读句柄/偏移），不能共用。
+        downloads: dict[str, object] = {}
+        download_cancelled: set = set()
 
         async def send_hello() -> None:
             scr = {"w": sw, "h": sh}
@@ -595,7 +694,15 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                              "auto_lock": SECURITY_CFG["auto_lock"],
                              "power": security.capabilities(),
                              "privacy": security.privacy_state()["mode"],
-                             "privacy_engine": security.PRIVACY_ENGINE})
+                             "privacy_engine": security.PRIVACY_ENGINE,
+                             # v0.2.3（协议 v3）：文件传输 + 光标隐藏能力。
+                             # 控制端据此置灰不支持的项，而不是给一个点了没反应的开关
+                             "file": True,
+                             "receive_dir": recv_dir(),
+                             "cursor": cursor_ctl.engine(),
+                             # 协议 v3 §6：能否接收控制端麦克风。老控制端忽略即可；
+                             # 新控制端据此置灰「麦克风」按钮并说明原因
+                             "mic": mic_ok})
             if screens:
                 await send_json({"p": "screens", "current": cur_screen, "list": screens})
             else:
@@ -656,6 +763,74 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                             await asyncio.to_thread(clips.apply_up, str(ev.get("text", "")))
                     elif p == "clip.sync":
                         clips.set_enabled(bool(ev.get("enable")))
+                    # ---- 文件传输（协议 v3 §2）----------------------------
+                    elif p == "file.offer":
+                        await send_json(await asyncio.to_thread(file_rx.offer, ev))
+                    elif p == "file.chunk":
+                        # 写盘是阻塞 IO，放线程池：一次 32KB 落盘很快，但不能占住信令循环
+                        st = await asyncio.to_thread(file_rx.chunk, ev)
+                        if st:
+                            await send_json(st)
+                    elif p == "file.done":
+                        await send_json(await asyncio.to_thread(file_rx.finish, ev))
+                    elif p == "file.cancel":
+                        tid = str(ev.get("id") or "")
+                        download_cancelled.add(tid)
+                        sender = downloads.pop(tid, None)
+                        if sender is not None:
+                            await asyncio.to_thread(sender.close)  # type: ignore[attr-defined]
+                        await asyncio.to_thread(file_rx.cancel, ev)
+                    elif p == "file.list":
+                        await send_json(await asyncio.to_thread(file_list, ev, recv_dir()))
+                    elif p == "file.get":
+                        # 控制端一定会带 id；兜底造一个只是为了不因畸形帧抛异常
+                        tid = str(ev.get("id") or "") or f"f-{int(time.time() * 1000)}"
+                        sender = file_xfer.FileSender(file_roots(recv_dir()),
+                                                      log=lambda m: print(m, flush=True))
+                        downloads[tid] = sender
+                        st = await asyncio.to_thread(sender.open, {**ev, "id": tid})
+                        await send_json(st)
+                        if st.get("p") == "file.accept":
+                            async def _push_download(sender=sender, tid=tid) -> None:
+                                """逐块推。每块 yield 一次事件循环——文件传输不能饿死输入。"""
+                                try:
+                                    while tid not in download_cancelled:
+                                        chunk = await asyncio.to_thread(sender.next_chunk)
+                                        if chunk is None:
+                                            break
+                                        await send_json(chunk)
+                                        await asyncio.sleep(0)
+                                    if tid not in download_cancelled:
+                                        await send_json(await asyncio.to_thread(sender.complete))
+                                except Exception as e:  # noqa: BLE001
+                                    await send_json({"p": "file.error", "id": tid,
+                                                     "reason": "io", "msg": str(e)})
+                                finally:
+                                    await asyncio.to_thread(sender.close)
+                                    downloads.pop(tid, None)
+                                    download_cancelled.discard(tid)
+                            asyncio.create_task(_push_download())
+                        else:
+                            downloads.pop(tid, None)
+                    # ---- 光标可见性（协议 v3 §3）--------------------------
+                    elif p == "cursor":
+                        want = bool(ev.get("visible", True))
+                        ok, eng, cerr = await asyncio.to_thread(cursor_ctl.set_visible, want)
+                        await send_json({"p": "cursor.state", "visible": want, "ok": ok,
+                                         "engine": eng,
+                                         **({} if ok else {"err": cerr})})
+                    elif p == "mic":
+                        # 协议 v3 §6：控制端麦克风 → 本机扬声器放音。
+                        # 只切「是否出声」，扬声器/音轨的生命周期跟着 RTC 会话走。
+                        _want = bool(ev.get("enable"))
+                        if rtc is not None and hasattr(rtc, "set_mic"):
+                            _mok, _merr, _mon = await rtc.set_mic(_want)
+                        else:
+                            # JPEG 通路没有 RTP，控制端据此把按钮弹回 OFF
+                            _mok, _merr, _mon = False, "unsupported", False
+                        await send_json({"p": "mic.state", "ok": _mok, "on": _mon,
+                                         "engine": "aiortc" if rtc else "unsupported",
+                                         **({} if _mok else {"err": _merr})})
                     elif p == "view.only":
                         # 只观看时清掉按住的修饰键，避免远端卡住 Shift
                         if ev.get("enable"):
@@ -860,6 +1035,27 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             # 断链必须松开所有修饰键 + 停剪贴板轮询，否则重连后远端卡 Shift
             release_all()
             await clips.stop()
+            # 文件传输：停掉下载任务、清掉半截 .part。半截文件留在接收目录里，
+            # 用户双击就是一个打不开的坏文件，比没有更让人困惑。
+            for _tid, _sender in list(downloads.items()):
+                download_cancelled.add(_tid)
+                try:
+                    await asyncio.to_thread(_sender.close)  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    pass
+            downloads.clear()
+            try:
+                await asyncio.to_thread(file_rx.close)
+            except Exception as e:  # noqa: BLE001
+                print(f"[agent] 文件接收收尾失败：{e}", flush=True)
+            # 光标：主控端鼠标模式下被控端光标是隐藏的。断链不还原，用户会以为
+            # 自己的鼠标坏了——这比遮罩/静音更需要收尾。用 restore() 而不是
+            # set_visible(True)：用户本来就把光标藏起来了（全屏演示/播放器）
+            # 的情况下，我们不该把它弄出来。
+            try:
+                cursor_ctl.restore()
+            except Exception as e:  # noqa: BLE001
+                print(f"[agent] 还原光标失败：{e}", flush=True)
             privacy_task.cancel()
             # 倒计时中若断链，撤销而不是继续执行：断线时执行关机最容易变成「人不在机器前」
             if _power_task and not _power_task.done():
@@ -910,11 +1106,20 @@ def main() -> int:
     ap.add_argument("--new-device", action="store_true",
                     help="强制注册一台新设备（会重写 ~/.uu-agent/device_id）")
     ap.add_argument("--insecure", action="store_true", help="跳过证书校验（自签调试）")
+    ap.add_argument("--receive-dir", default="",
+                    help="文件接收目录（默认 下载/UU Remote）；也是下载方向的白名单根之一")
     ap.add_argument("--no-update", action="store_true",
                     help="关闭被控端自更新（默认开；仅在 PyInstaller 打包产物里生效）")
     args = ap.parse_args()
     if not args.mobile and not args.token:
         ap.error("需要 --mobile 或 --token 之一")
+    global _RECV_DIR
+    _RECV_DIR = os.path.realpath(args.receive_dir) if args.receive_dir else default_receive_dir()
+    try:
+        os.makedirs(_RECV_DIR, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[agent] 接收目录不可用（{e}），文件传输将不可用", file=sys.stderr, flush=True)
+    print(f"[agent] 文件接收目录：{_RECV_DIR}", flush=True)
     print(f"[agent] uu-agent {AGENT_VERSION}（{platform.system()} {platform.machine()}）",
           flush=True)
     if not args.no_update:

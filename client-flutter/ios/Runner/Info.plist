@@ -43,7 +43,9 @@
 					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
 					<key>UISceneStoryboardFile</key>
 					<string>Main</string>
-				</dict>
+					<key>NSMicrophoneUsageDescription</key>
+	<string>开启语音后，把您的声音传到被控端电脑的扬声器，用于远程协助时通话。</string>
+</dict>
 			</array>
 		</dict>
 	</dict>

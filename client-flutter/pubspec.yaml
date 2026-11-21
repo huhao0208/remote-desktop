@@ -17,6 +17,8 @@ dependencies:
   # 自动升级要校验下载包的 sha256（GitHub Release 的 asset.digest 就是 sha256）。
   # crypto 是 Dart 官方包，纯 Dart 实现，不引入原生依赖。
   crypto: ^3.0.6
+  file_selector: ^1.1.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:

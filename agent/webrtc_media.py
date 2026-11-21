@@ -25,6 +25,11 @@ import av
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import AudioStreamTrack, MediaStreamError, VideoStreamTrack
 
+try:
+    import audio_playback
+except Exception:  # noqa: BLE001
+    audio_playback = None  # type: ignore
+
 from PIL import Image
 
 try:  # 脚本直跑与包内导入都要能用
@@ -380,6 +385,12 @@ class _Peer:
         self.mic: Optional[MicTrack] = None
         self.task: Optional[asyncio.Task] = None
         self.state = "new"
+        # 控制端麦克风（协议 v3 §6）：远端轨 → Speaker 放音
+        self.spk: Optional[Any] = None
+        self.sink: Optional[Any] = None
+        self.sink_task: Optional[asyncio.Task] = None
+        # 默认不放音：控制端必须显式 mic{enable:true}（协议 §6.5 规则 5「不做静默放音」）
+        self.muted = True
         # 换屏会重建轨：把已退役轨的统计累计到这里，关闭时才不会只报最后一条
         self.sent_prev = 0
         self.fails_prev = 0
@@ -483,6 +494,22 @@ class WebRTCMedia:
                       f"@显示器{p.track.monitor}/{p.track.backend}）")
         if p.task:
             p.task.cancel()
+        # 控制端麦克风（协议 v3 §6）：停消费 → 关扬声器。顺序不能反：
+        # 先关流再让 sink 继续 feed 会对已释放的 PortAudio 句柄写入。
+        if p.sink is not None:
+            p.sink.stop()
+            p.sink = None
+        if p.sink_task:
+            p.sink_task.cancel()
+            p.sink_task = None
+        if p.spk is not None:
+            frames = getattr(p.sink, "frames", 0)
+            self._log(f"[mic] {peer} 放音结束（{frames} 帧）" if frames else f"[mic] {peer} 关闭扬声器")
+            try:
+                p.spk.close()
+            except Exception:  # noqa: BLE001
+                pass
+            p.spk = None
         if p.mic:
             self._log(f"[rtc] {peer} 音频已发 {p.mic.frames} 帧，丢弃 {p.mic.dropped} 块")
             p.mic.stop()
@@ -536,6 +563,37 @@ class WebRTCMedia:
             })
 
         pc.addTrack(track)
+
+        # 协议 v3 §6：控制端麦克风。控制端的 offer 里那条 audio m-line 是
+        # sendrecv（预留反向能力），所以这里注册 on("track") 接收，**不 addTrack**
+        # ——Agent 自己的麦克风轨在下面按 audio_ok 单独挂，两条互不影响。
+        #
+        # 为什么不在收到 mic 消息时才注册：aiortc 的 track 事件在
+        # setRemoteDescription 期间就会触发，晚注册会漏掉。
+        @pc.on("track")
+        def _on_track(remote) -> None:  # noqa: ANN001
+            if getattr(remote, "kind", "") != "audio":
+                return
+            if audio_playback is None:
+                self._log("[mic] audio_playback 不可用，忽略对端音轨")
+                return
+            try:
+                spk = audio_playback.Speaker(rate=48000, channels=1)
+                if not spk.start():
+                    self._log("[mic] 扬声器打不开，忽略对端音轨")
+                    return
+                sess.spk = spk
+                sink = audio_playback.RemoteAudioSink(spk)
+                # 关键：把「是否放音」挂在 sink 上，而不是靠 Speaker 未打开来挡。
+                # 否则一旦扬声器为后续 mic{enable:true} 提前打开，未开启阶段收到的
+                # 帧会被直接放出来——那就是静默放音，违反协议 §6.5 规则 5。
+                sink.gate = lambda _s=sess: not _s.muted
+                sess.sink = sink
+                sess.sink_task = asyncio.ensure_future(sink.run(remote))
+                self._log("[mic] 已挂载控制端音轨")
+            except Exception as e:  # noqa: BLE001
+                self._log(f"[mic] 挂载对端音轨失败：{e}")
+
         await pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type="offer"))
         # 音频：只有对端 SDP 里确实有 m=audio 才挂轨——answer 不能新增 m-line，
         # 硬加会让协商失败。addTrack 会复用 offer 建出的那条 recvonly 传输。
@@ -555,6 +613,48 @@ class WebRTCMedia:
         self._log(f"[rtc] {peer} answer 已发（{kinds} {self.width}w {self.fps}fps "
                   f"{self.bitrate_bps//1000}kbps）")
         sess.task = asyncio.create_task(self._bitrate_watchdog(sess))
+
+    async def set_mic(self, enable: bool, peer: Optional[str] = None) -> tuple:
+        """开/关控制端麦克风的放音（协议 v3 §6）。
+
+        返回 `(ok, err, on)`：
+        - `ok`：本次请求是否被接受
+        - `err`：失败原因码（`no_audio` / `no_track` / `unsupported`）
+        - `on`：**切换后的实际状态**，控制端以它为准（不是请求值）
+
+        为什么「开」不在这里等扬声器就绪：扬声器在 `handle_offer` 收到音轨时就
+        已经打开了（`_on_track`），这里只切换**是否真的出声**——把 Speaker 的
+        打开推迟到这里会导致前几帧丢失，用户体感是「第一声听不到」。
+        """
+        if audio_playback is None or not audio_playback.available():
+            return (False, "no_audio", False)
+        targets = [peer] if peer else list(self._peers)
+        if not targets:
+            return (False, "unsupported", False)
+
+        any_ok = False
+        for name in targets:
+            sess = self._peers.get(name)
+            if sess is None:
+                continue
+            if enable:
+                spk = sess.spk
+                if spk is None:
+                    # 音轨还没到（控制端刚连上就点开麦）→ 等下一帧的到来，
+                    # 这里不回错误，返回 on=True 由后续帧自动出声
+                    any_ok = True
+                    continue
+                if not sess.muted:
+                    any_ok = True
+                    continue
+                sess.muted = False
+                any_ok = True
+            else:
+                sess.muted = True
+                any_ok = True
+        if not any_ok:
+            return (False, "no_track", False)
+        return (True, None, bool(enable))
 
     async def select_screen(self, idx: int) -> int:
         """切显示器：重建视频轨（分辨率变了）并强制关键帧，无需重新协商。

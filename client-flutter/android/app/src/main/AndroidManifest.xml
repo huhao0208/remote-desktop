@@ -3,6 +3,10 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- 自动升级：允许拉起系统安装器安装新版本 APK（仍需用户在弹窗确认） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- 协议 v3 §6：控制端麦克风（语音喊话）。运行时权限由插件在 getUserMedia 时申请，
+         这里不声明的话申请必然失败，按钮会永远弹回 OFF。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
 
     <application
         android:label="UU Remote"

@@ -10,5 +10,9 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
+	<!-- 协议 v3 §6：控制端麦克风。沙箱应用缺这项时 getUserMedia 一律失败，
+	     而且系统不会弹授权框——表现为「点了没反应」，很难排查。 -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
 </dict>
 </plist>
