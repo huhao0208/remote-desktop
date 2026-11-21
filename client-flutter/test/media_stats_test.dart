@@ -55,7 +55,9 @@ void main() {
     });
 
     test('画质档位不受服务端覆盖影响', () {
-      expect(AppConfig.qualityPresets.map((QualityPreset p) => p.value).first, '1280,55,4000');
+      // 6 档里的第一档是「自动」，与服务端地址无关；这里只保证列表稳定
+      expect(AppConfig.qualityPresets.first.key, 'auto');
+      expect(AppConfig.qualityPresets.length, 6);
     });
 
     test('--dart-define=UU_SERVER 时优先于内置常量', () {

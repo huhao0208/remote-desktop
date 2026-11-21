@@ -22,7 +22,19 @@ class FramePacket {
 /// JPEG 通路的 fps 由页面自己数帧；WebRTC 没有帧流（画面在原生纹理里），只能读
 /// `pc.getStats()` 的 `inbound-rtp`，所以统一从这个结构体出。
 class TransportStats {
-  const TransportStats({this.fps, this.width = 0, this.height = 0});
+  const TransportStats({
+    this.fps,
+    this.width = 0,
+    this.height = 0,
+    this.rttMs,
+    this.bitrateKbps,
+    this.lossPercent,
+    this.jitterMs,
+    this.jitterBufferMs,
+    this.dropped,
+    this.codec,
+    this.iceType,
+  });
 
   /// `null` = 还没统计到（尚未收到首帧）→ HUD 显示 `—`，不要显示 `0 fps`
   /// 让人误判成「卡住」。
@@ -32,7 +44,49 @@ class TransportStats {
   final int width;
   final int height;
 
+  /// 以下字段只给「连接信息面板」用（`docs/远控复刻基线.md` P0-2）。
+  /// 全部可为 `null`：平台/插件版本不同，`getStats()` 不一定有这些键，
+  /// **不要用 0 兜底**——面板上「—」和「0 ms」是两件事。
+  final int? rttMs;
+
+  /// 接收码率（kbps），由 `bytesReceived` 增量按秒折算。
+  final int? bitrateKbps;
+
+  /// 丢包率（0–100），来自 `packetsLost / (packetsLost + packetsReceived)`。
+  final double? lossPercent;
+
+  /// 网络抖动（ms），`inbound-rtp.jitter` 直接是秒。
+  final int? jitterMs;
+
+  /// 抖动缓冲深度（ms），`jitterBufferDelay / jitterBufferEmittedCount`。
+  final int? jitterBufferMs;
+
+  /// 累计丢帧（`framesDropped`，解码侧）。
+  final int? dropped;
+
+  /// 编码格式（`video/H264` → `H.264`）。
+  final String? codec;
+
+  /// 选中的候选对类型：`host` / `srflx` / `prflx` / `relay`。
+  /// `host` = 局域网直连，`relay` = TURN 中转。
+  final String? iceType;
+
   bool get hasVideo => width > 0 && height > 0;
+
+  /// 直连 / 中转的中文说明（官方文案：局域网直连 / 安全中转连接）。
+  String get connectionPathLabel {
+    switch (iceType) {
+      case 'host':
+        return '局域网直连';
+      case 'srflx':
+      case 'prflx':
+        return 'P2P 直连（NAT 穿透）';
+      case 'relay':
+        return '安全中转连接';
+      default:
+        return '—';
+    }
+  }
 }
 
 /// 媒体通路抽象。

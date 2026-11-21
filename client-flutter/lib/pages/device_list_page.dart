@@ -6,11 +6,13 @@ import 'package:material_ui/material_ui.dart';
 
 import '../core/agent_host.dart';
 import '../core/api_client.dart';
+import '../core/lock_service.dart';
 import '../core/models.dart';
 import '../core/settings.dart';
 import '../core/theme.dart';
 import '../core/updater.dart';
 import '../core/version.g.dart';
+import '../widgets/client_lock_panel.dart';
 import '../widgets/ui_kit.dart';
 import '../widgets/update_dialog.dart';
 import 'login_page.dart';
@@ -679,6 +681,21 @@ class _ProfileTabState extends State<_ProfileTab> {
                         value: _updateValue(),
                         highlight: widget.update?.hasUpdate ?? false,
                         onTap: widget.onCheckUpdate == null ? null : () => widget.onCheckUpdate!(),
+                      ),
+                      const Divider(height: 1),
+                      _row(
+                        context,
+                        icon: Icons.lock_outline,
+                        // 官方的「安全锁定」就是客户端锁：设密码 + 三种自动锁定
+                        label: '安全锁定',
+                        value: LockService.instance.client.hasPassword ? '已设置密码' : '未设置',
+                        highlight: LockService.instance.client.hasPassword,
+                        onTap: () => showClientLockPanel(
+                          context,
+                          onChanged: () {
+                            if (mounted) setState(() {});
+                          },
+                        ),
                       ),
                     ],
                   ),

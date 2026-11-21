@@ -122,15 +122,28 @@ void main() {
   });
 
   group('画质档位', () {
-    test('三档位 value 与 control.html 一致', () {
-      expect(AppConfig.qualityPresets.map((QualityPreset p) => p.value).toList(),
-          <String>['1280,55,4000', '1920,75,8000', '2560,80,20000']);
+    test('六档位 key 与官方 Control.Menu.Quality 对齐', () {
+      expect(AppConfig.qualityPresets.map((QualityPreset p) => p.key).toList(),
+          <String>['auto', 'speed', 'normal', 'hd', 'blue', 'original']);
+      expect(AppConfig.qualityPresets.map((QualityPreset p) => p.hint).toList(),
+          <String>['动态', '480P', '1080P', '2K', '4K', '源分辨率']);
     });
 
     test('未知 value 回落到高清档', () {
-      expect(QualityPreset.fromValue('1280,55,4000').width, 1280);
-      expect(QualityPreset.fromValue('bad').value, '1920,75,8000');
-      expect(QualityPreset.fromValue(null).value, '1920,75,8000');
+      expect(QualityPreset.fromValue('bad').key, 'normal');
+      expect(QualityPreset.fromValue(null).key, 'normal');
+      expect(QualityPreset.fromValue('').key, 'normal');
+    });
+
+    test('老版本 `width,quality,bitrate` 值能映射回对应档位（升级不跳档）', () {
+      expect(QualityPreset.fromValue('854,55,3000').key, 'speed');
+      expect(QualityPreset.fromValue('1920,75,8000').key, 'normal');
+      expect(QualityPreset.fromValue('2560,80,20000').key, 'hd');
+      // 老的自定义档按宽度就近归档
+      expect(QualityPreset.fromValue('1440,70,9000').key, 'normal');
+      expect(QualityPreset.fromValue('2400,80,18000').key, 'hd');
+      expect(QualityPreset.fromValue('3000,80,30000').key, 'blue');
+      expect(QualityPreset.fromValue('800,60,2000').key, 'speed');
     });
   });
 

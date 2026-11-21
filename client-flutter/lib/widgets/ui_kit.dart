@@ -338,6 +338,7 @@ class ToolButton extends StatefulWidget {
     this.active = false,
     this.badge,
     this.danger = false,
+    this.label,
   });
 
   final IconData icon;
@@ -345,6 +346,11 @@ class ToolButton extends StatefulWidget {
   final VoidCallback? onPressed;
   final bool active;
   final String? badge;
+
+  /// 图标右侧的文字标签。远控底栏一律带标签：触屏上没有 hover，
+  /// 光靠图标分不清「键盘接管」和「发送 Ctrl+Alt+Del」这种近义动作。
+  /// 传 null 时保持原来的 38×38 纯图标形态。
+  final String? label;
 
   /// 危险操作（断开/退出）用红色
   final bool danger;
@@ -377,8 +383,11 @@ class _ToolButtonState extends State<ToolButton> {
             borderRadius: BorderRadius.circular(AppRadius.sm),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 120),
-              width: 38,
+              width: widget.label == null ? 38 : null,
               height: 38,
+              padding: widget.label == null
+                  ? EdgeInsets.zero
+                  : const EdgeInsets.symmetric(horizontal: 9),
               decoration: BoxDecoration(
                 color: on
                     ? AppColors.accent.withValues(alpha: 0.18)
@@ -389,7 +398,20 @@ class _ToolButtonState extends State<ToolButton> {
               child: Stack(
                 alignment: Alignment.center,
                 children: <Widget>[
-                  Icon(widget.icon, size: 19, color: fg),
+                  if (widget.label == null)
+                    Icon(widget.icon, size: 19, color: fg)
+                  else
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(widget.icon, size: 17, color: fg),
+                        const SizedBox(width: 5),
+                        Text(
+                          widget.label!,
+                          style: TextStyle(fontSize: 11, color: fg, fontWeight: FontWeight.w500, height: 1.2),
+                        ),
+                      ],
+                    ),
                   if (widget.badge != null)
                     Positioned(
                       right: 5,

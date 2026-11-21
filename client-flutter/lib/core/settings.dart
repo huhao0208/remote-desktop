@@ -19,7 +19,14 @@ class Settings {
   static const String _kUuid = 'device_uuid';
   static const String _kDeviceId = 'device_id';
   static const String _kQuality = 'quality_preset';
+  static const String _kStreamFps = 'stream_fps';
+  static const String _kStreamRes = 'stream_resolution';
+  static const String _kStreamResWidth = 'stream_resolution_width';
+  static const String _kStreamBitrate = 'stream_bitrate';
   static const String _kAllowBeControlled = 'allow_be_controlled';
+  static const String _kClipboardSync = 'clipboard_sync';
+  static const String _kShortcuts = 'shortcuts_json';
+  static const String _kMiniWindow = 'mini_window_json';
 
   // ---- 自动升级（v0.2.0 起）----
   static const String _kUpdateCheckMs = 'update_last_check_ms';
@@ -92,11 +99,67 @@ class Settings {
   static String get qualityValue => _prefs.getString(_kQuality) ?? '';
   static Future<void> setQualityValue(String value) => _prefs.setString(_kQuality, value);
 
+  // ---- 画质细项（v0.2.1）：分辨率覆盖 / 帧率 / 自定义码率 ----------------
+  // 三者与画质档位**相互独立**：换档位不清空这三项；分辨率选 `preset` 时
+  // 才回落到档位自带宽度，码率 0 = 按档位/自动推算（见 `StreamPrefs`）。
+
+  static int get streamFps => _prefs.getInt(_kStreamFps) ?? AppConfig.defaultFps;
+  static Future<void> setStreamFps(int value) => _prefs.setInt(_kStreamFps, value);
+
+  static String get streamResolution => _prefs.getString(_kStreamRes) ?? 'preset';
+  static Future<void> setStreamResolution(String value) => _prefs.setString(_kStreamRes, value);
+
+  /// `follow_local` 时缓存的像素宽（换了窗口尺寸会刷新）。
+  static int get streamResolutionWidth => _prefs.getInt(_kStreamResWidth) ?? 0;
+  static Future<void> setStreamResolutionWidth(int value) =>
+      _prefs.setInt(_kStreamResWidth, value);
+
+  static int get streamBitrate => _prefs.getInt(_kStreamBitrate) ?? 0;
+  static Future<void> setStreamBitrate(int value) => _prefs.setInt(_kStreamBitrate, value);
+
+  /// 当前画质参数（档位 + 细项合成），页面和面板共用同一个入口。
+  static StreamPrefs get streamPrefs => StreamPrefs(
+        preset: QualityPreset.fromValue(qualityValue),
+        resolutionKey: streamResolution,
+        resolutionWidth: streamResolutionWidth,
+        fps: streamFps,
+        bitrateOverride: streamBitrate,
+        customBitrate: streamBitrate > 0,
+      );
+
+  static Future<void> saveStreamPrefs(StreamPrefs prefs) async {
+    await setQualityValue(prefs.preset.value);
+    await setStreamResolution(prefs.resolutionKey);
+    if (prefs.resolutionWidth > 0) await setStreamResolutionWidth(prefs.resolutionWidth);
+    await setStreamFps(prefs.fps);
+    await setStreamBitrate(prefs.customBitrate ? prefs.bitrateOverride : 0);
+  }
+
   /// 「允许其他设备控制本机」：默认开（登录即启动被控端），用户可关。
   static bool get allowBeControlled => _prefs.getBool(_kAllowBeControlled) ?? true;
 
   static Future<void> setAllowBeControlled(bool value) =>
       _prefs.setBool(_kAllowBeControlled, value);
+
+  /// 远控中「剪贴板双向同步」开关，默认开（与官方一致）。
+  ///
+  /// 关掉后两个方向都不动作：既不把被控端复制的内容写进本机剪贴板
+  /// （密码管理器场景用户会想关），也不再上行本机内容。
+  static bool get clipboardSync => _prefs.getBool(_kClipboardSync) ?? true;
+
+  static Future<void> setClipboardSync(bool value) => _prefs.setBool(_kClipboardSync, value);
+
+  /// 自定义快捷键表（JSON）。只存与出厂默认不同的项 + 用户删掉的项。
+  static String get shortcutsJson => _prefs.getString(_kShortcuts) ?? '';
+
+  static Future<void> setShortcutsJson(String value) => _prefs.setString(_kShortcuts, value);
+
+  /// 小窗模式参数（置顶/透明度/尺寸档）。只存偏好，不存窗口位置——
+  /// 每次进入都从右下角重新摆，避免显示器换分辨率后窗口跑丢。
+  static String get miniWindowJson => _prefs.getString(_kMiniWindow) ?? '';
+
+  static Future<void> setMiniWindowJson(String value) =>
+      _prefs.setString(_kMiniWindow, value);
 
   static bool get hasSession => token.isNotEmpty && deviceId.isNotEmpty;
 

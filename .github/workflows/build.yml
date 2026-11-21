@@ -116,18 +116,40 @@ jobs:
           #   代价是产物从单文件变成「uu-agent + _internal/」目录，
           #   随包分发时要把整个目录摊平进客户端（见下面各 flutter-build-* job）。
           #
-          # --exclude-module 那几个：tkinter 只被 pyautogui 的 mouseinfo/pymsgbox
-          # （弹窗调试工具）需要，agent 从不调用，而且它们在 pyautogui 里是
-          # try/except 懒加载。排除后实测 `import pyautogui` + `pyautogui.size()` 正常，
-          # 单平台省 ~10MB（tcl/tk 运行库 + sounddevice 数据）。
+          # tkinter 取舍：防窥遮罩窗（agent/privacy_overlay.py）是 Tk 窗口，
+          # 「遮罩不进录屏」由各平台自己的接口实现：
+          #   Windows：SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)
+          #   macOS  ：NSWindow.sharingType = NSWindowSharingNone（顺带 setLevel:25 抬层级）
+          # 两者都依赖 `tk.Tk()`，所以 **Windows 和 macOS 都要保留 tkinter**（各 +约 10MB）。
+          # 只有 Linux 没有对应实现（security.PRIVACY_ENGINE 判为 unsupported），
+          # 才排除 tkinter 省体积。
+          # mouseinfo/pymsgbox 是 pyautogui 的弹窗调试工具，agent 从不调用，
+          # 且 pyautogui 里是 try/except 懒加载，排除后 `pyautogui.size()` 仍正常。
+          TK_EXCLUDES=()
+          PLATFORM_HIDDEN=()
+          if [ "${{ matrix.name }}" == "linux-x64" ]; then
+            TK_EXCLUDES=(--exclude-module tkinter --exclude-module _tkinter)
+          else
+            # 遮罩的壁纸模式要 PIL.ImageTk 才能在 Tk 里显示图片
+            PLATFORM_HIDDEN+=(--hidden-import PIL.ImageTk)
+          fi
+          # win_audio 顶层就 `from ctypes import WINFUNCTYPE`，非 Windows 上 import
+          # 直接 ImportError，只能在 Windows 打包时 hidden-import
+          #（运行时由 agent.py 的 --mute-helper 分支懒加载 + try/except 兜住）。
+          if [ "${{ matrix.name }}" == "windows-x64" ]; then
+            PLATFORM_HIDDEN+=(--hidden-import win_audio)
+          fi
           pyinstaller --onedir --name uu-agent \
             --collect-submodules mss \
             --collect-submodules aiortc \
             --collect-all av \
             --hidden-import webrtc_media \
             --hidden-import updater \
+            --hidden-import security \
+            --hidden-import privacy_overlay \
+            "${PLATFORM_HIDDEN[@]}" \
             --hidden-import pyautogui --hidden-import PIL \
-            --exclude-module tkinter --exclude-module _tkinter \
+            "${TK_EXCLUDES[@]}" \
             --exclude-module mouseinfo --exclude-module pymsgbox \
             --exclude-module sounddevice \
             --distpath dist --workpath build_tmp2 --specpath build_tmp2 \

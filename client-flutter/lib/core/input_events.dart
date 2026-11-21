@@ -13,8 +13,15 @@ class InputEvent {
   static Map<String, dynamic> click(num x, num y, {String btn = 'left'}) =>
       <String, dynamic>{'p': 'input', 't': 'click', 'btn': btn, 'x': _norm(x), 'y': _norm(y)};
 
-  static Map<String, dynamic> scroll(num dy) =>
-      <String, dynamic>{'p': 'input', 't': 'scroll', 'dy': dy.toInt()};
+  /// 滚轮。[mods] 是**当前真实按住的修饰键**（v2 §4）：Agent 侧看到 mods 会
+  /// 临时按住再滚，`Ctrl+滚轮` 才能触达远端缩放；空列表则不附加字段。
+  static Map<String, dynamic> scroll(num dy, {List<String> mods = const <String>[]}) =>
+      <String, dynamic>{
+        'p': 'input',
+        't': 'scroll',
+        'dy': dy.toInt(),
+        if (mods.isNotEmpty) 'mods': mods,
+      };
 
   /// 按下并抬起（含组合键主键）。
   static Map<String, dynamic> press(String key) =>
@@ -54,6 +61,24 @@ class InputEvent {
 
   static Map<String, dynamic> cancelShutdown() =>
       <String, dynamic>{'p': 'shutdown', 'cancel': true};
+
+  /// 剪贴板上行（协议 v2 §2）：把本机文本写进被控端剪贴板。
+  ///
+  /// 与 [text] 的区别：[text] 是「像打字一样输入」，本构造器只改远端剪贴板，
+  /// 由用户自己在远端按粘贴。双向同步靠它。
+  static Map<String, dynamic> clipUp(String value) =>
+      <String, dynamic>{'p': 'clip', 'dir': 'up', 'text': value};
+
+  /// 剪贴板同步开关。**Agent 侧默认关闭**，必须显式打开才会推 `dir:"down"`。
+  static Map<String, dynamic> clipSync(bool enable) =>
+      <String, dynamic>{'p': 'clip.sync', 'enable': enable};
+
+  /// 只看不控：进观看/批注态时告知被控端。
+  ///
+  /// Agent 收到 `enable:true` 会 `release_all()` 清掉按住的修饰键——本端之后
+  /// 不再发 input，若不在切换瞬间补这一下，远端会一直卡着 Shift/Alt。
+  static Map<String, dynamic> viewOnly(bool enable) =>
+      <String, dynamic>{'p': 'view.only', 'enable': enable};
 }
 
 /// Flutter 键位 → 协议键名（对齐 control.html 的 MODKEYS / KEYMAP）。

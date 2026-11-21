@@ -33,7 +33,7 @@ typedef WebRtcFallback = void Function(String reason);
 /// 的是：① 只声明 recvonly，不做任何缩放；② 把 `degradationPreference` 写进
 /// RTP 参数；③ 画面按 1:1 像素渲染（`BoxFit.contain`，不超采样）。
 ///
-/// v2 能力（音频 / 剪贴板 / 多屏 / 修饰键）只留挂点，见文件末尾 TODO。
+/// v2 能力（音频 / 剪贴板 / 多屏 / 修饰键）已实现，逐项状态见文件末尾对照表。
 class WebRtcTransport extends MediaTransport {
   final StreamController<FramePacket> _frames = StreamController<FramePacket>.broadcast();
   final ValueNotifier<TransportStats> _stats =
@@ -58,6 +58,9 @@ class WebRtcTransport extends MediaTransport {
   bool _fallbackNotified = false;
 
   int _lastFrames = 0;
+
+  /// 上一次采样的 `bytesReceived` 基线：算接收码率要用差分（累计值本身没意义）。
+  int _lastBytes = 0;
   DateTime? _lastStatsAt;
 
   String _peer = 'ctl';
@@ -181,7 +184,7 @@ class WebRtcTransport extends MediaTransport {
         debugPrint('[webrtc] 连接状态处理失败：$e');
       }
     };
-    // TODO(v2-multiscreen): 协议 v2 §3。实测（agent/webrtc_media.py:556 select_screen）
+    // 多屏切轨（协议 v2 §3，已实现）。实测（agent/webrtc_media.py select_screen）
     // 切屏走 `sender.replaceTrack(new)` + 强制关键帧，**不重协商、不发 rtc.offer**，
     // 分辨率变化由 SPS 自适应，客户端无需应答。只有未来 Agent 真的要新增 m-line
     // （比如新加一条轨）才会出现入向 offer，届时才需要在这里 createAnswer。
@@ -358,38 +361,51 @@ class WebRtcTransport extends MediaTransport {
     if (pc == null || _disposed) return;
     try {
       final List<StatsReport> reports = await pc.getStats();
+      // 摊平成 {id, type, ...values}：面板要跨 inbound-rtp / candidate-pair /
+      // codec 三类对象 join，纯函数只接受 Map 列表（见 rtc_stats.dart）。
+      final List<Map<String, dynamic>> flat = <Map<String, dynamic>>[];
+      Map<dynamic, dynamic>? inboundVideo;
+      int? bytesReceived;
       for (final StatsReport report in reports) {
+        final Map<String, dynamic> row = <String, dynamic>{
+          'id': report.id,
+          'type': report.type,
+        };
+        report.values.forEach((Object? k, Object? v) => row['$k'] = v);
+        flat.add(row);
         if (report.type != 'inbound-rtp') continue;
-        final Map<dynamic, dynamic> values = report.values;
-        final String kind = (values['kind'] ?? values['mediaType'] ?? '').toString();
-        if (kind != 'video') continue;
-        _updateStats(values);
-        // 对账日志只在「真的连着」时打：回落/断开立刻停，避免日志误导
-        if (pc.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-          debugPrint(formatRtpStatsLine(values));
-        }
-        return;
+        final String kind =
+            (report.values['kind'] ?? report.values['mediaType'] ?? '').toString();
+        if (kind != 'video' || inboundVideo != null) continue;
+        inboundVideo = report.values;
+        final Object? bytes = report.values['bytesReceived'];
+        if (bytes is num) bytesReceived = bytes.toInt();
+      }
+      if (inboundVideo == null) return;
+
+      final DateTime now = DateTime.now();
+      final StatsSnapshot snapshot = parseStatsSnapshot(
+        flat,
+        lastFrames: _lastFrames,
+        lastBytes: _lastBytes,
+        lastAt: _lastStatsAt,
+        now: now,
+      );
+      _stats.value = snapshot.toTransportStats();
+
+      final int? frames = snapshot.framesDecoded;
+      if (frames != null && frames > 0) {
+        _lastFrames = frames;
+        _lastStatsAt = now;
+        if (bytesReceived != null) _lastBytes = bytesReceived;
+      }
+      // 对账日志只在「真的连着」时打：回落/断开立刻停，避免日志误导
+      if (pc.connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        debugPrint(formatRtpStatsLine(inboundVideo));
       }
     } catch (e) {
       // 计时器回调里抛异常 = Zone 顶层未捕获，这里必须吃掉
       debugPrint('[webrtc] getStats 失败（本轮跳过）：$e');
-    }
-  }
-
-  /// HUD 统计：fps 两个来源（原生 `framesPerSecond` / `framesDecoded` 增量），
-  /// 两个都拿不到才是 `null`（HUD 显示 `—`，表示「还没统计到」而不是 0 帧）。
-  void _updateStats(Map<dynamic, dynamic> values) {
-    final DateTime now = DateTime.now();
-    _stats.value = parseInboundStats(
-      values,
-      lastFrames: _lastFrames,
-      lastAt: _lastStatsAt,
-      now: now,
-    );
-    final int? frames = rtpInt(values['framesDecoded'] ?? values['framesReceived']);
-    if (frames != null && frames > 0) {
-      _lastFrames = frames;
-      _lastStatsAt = now;
     }
   }
 
@@ -470,9 +486,9 @@ class WebRtcTransport extends MediaTransport {
 // | 能力     | 状态                                                          |
 // |----------|---------------------------------------------------------------|
 // | 音频     | ✅ 已实现：hello.audio → audio recvonly + 原生播放 + 本地静音 |
-// | 剪贴板   | TODO：{p:'clip',dir:'up'|'down',text} + {p:'clip.sync'}，md5 去重 |
-// | 多屏     | TODO：{p:'screens'} / {p:'screen.select'}；Agent 用 replaceTrack 不重协商 |
-// | 修饰键   | 远控页已有 v1 版 keydown/keyup；v2 要求 blur 时全释放          |
+// | 剪贴板   | ✅ 已实现：{p:'clip',dir:'up'|'down',text} + {p:'clip.sync}',md5 去重 |
+// | 多屏     | ✅ 已实现：页面消费 {p:'screens'} / {p:'screen.selected'}，切屏由 Agent 换轨 |
+// | 修饰键   | ✅ 远控页 blur 全释放；v2 的 scroll+mods 已带（Ctrl+滚轮缩放） |
 //
 // 以上消息都复用现有 WS，服务端零改动。
 // ---------------------------------------------------------------------------

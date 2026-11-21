@@ -16,6 +16,14 @@ int _asInt(Object? v, [int fallback = 0]) {
 
 String _asString(Object? v, [String fallback = '']) => v?.toString() ?? fallback;
 
+List<String> _asStringList(Object? v) {
+  if (v is! List) return const <String>[];
+  return <String>[
+    for (final Object? e in v)
+      if (e != null && e.toString().isNotEmpty) e.toString(),
+  ];
+}
+
 /// `/api/v1/login/by_mobile` 的返回。
 class LoginResult {
   const LoginResult({
@@ -186,6 +194,15 @@ class AgentHello {
     required this.media,
     required this.fps,
     this.audio = false,
+    this.screens = 1,
+    this.version,
+    this.ip,
+    this.capture,
+    this.maxFps = 60,
+    this.autoLock = false,
+    this.power = const <String>[],
+    this.privacy = 'off',
+    this.privacyEngine = 'unknown',
   });
 
   final String name;
@@ -200,6 +217,41 @@ class AgentHello {
   /// 协议 v2 §1：本会话是否会有音频轨。老 Agent 不发 → false。
   final bool audio;
 
+  /// 协议 v2 §3：显示器数量（连接信息面板 / 切屏按钮用）。老 Agent → 1。
+  final int screens;
+
+  /// 被控端 Agent 版本（v0.2.0 起 `--version` 与 hello 同源）。老 Agent → null。
+  final String? version;
+
+  /// 被控端局域网 IP（用于排障对表）。老 Agent → null。
+  final String? ip;
+
+  /// 采集后端自述（`mss` / `screencapture` / `dxgi` …）。老 Agent → null。
+  final String? capture;
+
+  /// 被控端粗测的采集上限（fps）。只用来在画质面板里提示「超出采集能力」，
+  /// **不做硬拦截**——探测本身有误差，误禁比误开更烦人。老 Agent → 60。
+  final int maxFps;
+
+  /// 结束远程自动锁屏（官方 `autoLock`）。老 Agent → false。
+  final bool autoLock;
+
+  /// 支持的电源动作（`lock` / `reboot` / `shutdown` / `taskmgr`）。
+  /// 空列表 = 老 Agent，按「全部支持」处理更宽松？不——按全部支持处理会让用户
+  /// 点了没反应，所以老 Agent 一律只放行 `shutdown`（它一定有）。
+  final List<String> power;
+
+  /// 当前防窥档位 key。老 Agent → `off`。
+  final String privacy;
+
+  /// 防窥引擎：`overlay`（真遮罩窗）/ `unsupported`（平台做不了）。
+  final String privacyEngine;
+
+  bool supportsPower(String action) {
+    if (power.isEmpty) return action == 'shutdown';
+    return power.contains(action);
+  }
+
   bool get isWebRtc => media.toLowerCase() == 'webrtc';
 
   factory AgentHello.fromJson(Map<String, dynamic> json) {
@@ -208,6 +260,9 @@ class AgentHello {
     final stream = json['stream'];
     final st = stream is Map ? stream.cast<String, dynamic>() : const <String, dynamic>{};
     final media = _asString(json['media']).toLowerCase();
+    final String version = _asString(json['version']);
+    final String ip = _asString(json['ip']);
+    final String capture = _asString(json['capture']);
     return AgentHello(
       name: _asString(json['name'], '被控端'),
       os: _asString(json['os'], 'unknown'),
@@ -216,6 +271,64 @@ class AgentHello {
       media: media.isEmpty ? 'jpeg' : media,
       fps: _asInt(st['fps'], 30),
       audio: _asBool(json['audio']),
+      screens: _asInt(json['screens'], 1).clamp(1, 16),
+      version: version.isEmpty ? null : version,
+      ip: ip.isEmpty ? null : ip,
+      capture: capture.isEmpty ? null : capture,
+      maxFps: _asInt(json['max_fps'], 60).clamp(1, 144),
+      autoLock: _asBool(json['auto_lock']),
+      power: _asStringList(json['power']),
+      privacy: _asString(json['privacy'], 'off'),
+      privacyEngine: _asString(json['privacy_engine'], 'unknown'),
     );
+  }
+}
+/// 一块被控端显示器（协议 v2 §3 的 `screens.list[]` 元素）。
+///
+/// `id` 就是 Agent 侧显示器下标，`screen.select` 直接回传它；**不要用列表下标
+/// 代替 id**——多屏热插拔后两者可能不一致。
+class ScreenInfo {
+  const ScreenInfo({
+    required this.id,
+    required this.width,
+    required this.height,
+    this.x = 0,
+    this.y = 0,
+    this.name = '',
+    this.primary = false,
+  });
+
+  final int id;
+  final int width;
+  final int height;
+  final int x;
+  final int y;
+  final String name;
+  final bool primary;
+
+  /// 界面上的一行文案：`内建 · 2048×1280`（主屏加「主」标）。
+  String get label {
+    final String n = name.isEmpty ? '显示屏 ${id + 1}' : name;
+    final String res = '$width×$height';
+    return primary ? '$n · $res（主）' : '$n · $res';
+  }
+
+  factory ScreenInfo.fromJson(Map<String, dynamic> json) => ScreenInfo(
+        id: _asInt(json['id']),
+        width: _asInt(json['w']),
+        height: _asInt(json['h']),
+        x: _asInt(json['x']),
+        y: _asInt(json['y']),
+        name: _asString(json['name']),
+        primary: _asBool(json['primary']),
+      );
+
+  static List<ScreenInfo> listFrom(Object? raw) {
+    if (raw is! List) return const <ScreenInfo>[];
+    final List<ScreenInfo> out = <ScreenInfo>[];
+    for (final Object? item in raw) {
+      if (item is Map) out.add(ScreenInfo.fromJson(item.cast<String, dynamic>()));
+    }
+    return out;
   }
 }

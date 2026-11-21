@@ -24,11 +24,28 @@ import os
 import platform
 import re
 import ssl
+import socket
 import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+
+# 辅助子进程分流：这两个入口必须在 import httpx/mss/PIL/pyautogui **之前** 处理，
+# 否则遮罩窗要扛下整套重依赖的导入开销（冷启多 0.5–1s），
+# 任一可选依赖缺失还会把遮罩窗一起带崩。
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] in (
+        "--privacy-overlay", "--mute-helper"):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        if sys.argv[1] == "--privacy-overlay":
+            from privacy_overlay import main as _overlay_main
+        else:
+            from win_audio import main as _overlay_main  # type: ignore[assignment]
+    except Exception as _e:  # 缺 tkinter/Pillow：给父进程一句能读的错，不要抛栈
+        print(json.dumps({"ok": False, "err": f"辅助模块不可用：{_e}"}, ensure_ascii=False))
+        sys.exit(3)
+    sys.exit(_overlay_main(sys.argv[2:]))
 
 import httpx
 import mss
@@ -39,10 +56,12 @@ try:  # 脚本直跑（python agent/agent.py）与包内导入（import agent.ag
     from ._version import VERSION as AGENT_VERSION
     from .clipboard_sync import ClipboardSync
     from .screens import grab_screencapture, list_monitors
+    from . import security
 except ImportError:
     from _version import VERSION as AGENT_VERSION
     from clipboard_sync import ClipboardSync
     from screens import grab_screencapture, list_monitors
+    import security
 
 SYSTEM = platform.system()  # Windows / Darwin / Linux
 FRAME_MAGIC = b"FRM1"
@@ -284,6 +303,44 @@ def _paste_text(text: str) -> None:
 
 # ---------------------------------------------------------------- 多显示器
 
+def _local_ip() -> str:
+    """本机局域网 IP（控制端「连接信息」面板排障对表用）。
+
+    UDP `connect()` 只做路由选择**不发包**；拿不到就返回空串，绝不让它影响启动。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 53))
+        return s.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        s.close()
+
+
+def probe_capture_fps(limit: int = 144) -> int:
+    """粗测采集上限（连续 3 帧平均耗时），只用于画质面板的「超出采集能力」提示。
+
+    为什么不用它做硬拦截：只测了 grab，没测编码；编码耗时随画质档和硬件变化，
+    拿这个数去禁用档位会误伤（宁可让用户试一下再降档）。探测失败返回 30 保守值。
+    """
+    try:
+        with mss.mss() as sct:
+            if len(sct.monitors) < 2:
+                return 30
+            mon = sct.monitors[1]
+            n = 3
+            t0 = time.perf_counter()
+            for _ in range(n):
+                sct.grab(mon)
+            dt = (time.perf_counter() - t0) / n
+        if dt <= 0:
+            return limit
+        return max(15, min(limit, int(1.0 / dt)))
+    except Exception:
+        return 30
+
+
 def list_screens() -> list[dict]:
     """协议 `screens.list`：id 即显示器下标（顺序与 screens.py 一致）。
 
@@ -306,53 +363,83 @@ def list_screens() -> list[dict]:
     } for i, m in enumerate(mons)]
 
 
-# ---------------------------------------------------------------- 关机（可撤销）
+# ---------------------------------------------------------------- 电源（可撤销）
 
-_shutdown_task: asyncio.Task | None = None
+_power_task: asyncio.Task | None = None
+POWER_ACTIONS = ("lock", "reboot", "shutdown", "taskmgr")
 
-
-def _shutdown_cmd(seconds: int) -> list[str]:
-    if SYSTEM == "Windows":
-        return ["shutdown", "/s", "/t", str(seconds)]
-    if SYSTEM == "Darwin":
-        # macOS shutdown 需要 root；无 root 时走 osascript 触发系统关机对话框
-        return ["osascript", "-e", 'tell app "System Events" to shut down']
-    return ["shutdown", "-h", f"+{max(1, seconds // 60)}"]
+# 会话级安全状态：开关由控制端下发，auto_lock 落盘（下次开机仍生效）
+SECURITY_CFG = security.load_cfg()
+MUTED_BY_REMOTE = False  # 只回滚我们自己切过的静音，别动用户原本的选择
 
 
-def _cancel_cmd() -> list[str]:
-    if SYSTEM == "Windows":
-        return ["shutdown", "/a"]
-    if SYSTEM == "Darwin":
-        return []  # osascript 对话框由用户取消
-    return ["shutdown", "-c"]
+async def _emit_power(send_json, action: str, state: str, **extra) -> None:
+    """发 `power.state`；关机动作额外补一条旧版 `shutdown.state`。
+
+    旧 H5 控制页（`srv2/control.html`）还在用 `{p:'shutdown'}` + `shutdown.state`，
+    直接改协议会让它静默失效——所以新协议发新的，关机额度外补发旧的。
+    """
+    await send_json({"p": "power.state", "action": action, "state": state, **extra})
+    if action == "shutdown":
+        await send_json({"p": "shutdown.state", "state": state, **extra})
 
 
-async def handle_shutdown(ev: dict, send_json) -> None:
-    """30s 缓冲：先发预告，期间收到 cancel 则中止；到点才真正执行。"""
-    global _shutdown_task
-    if ev.get("cancel"):
-        if _shutdown_task and not _shutdown_task.done():
-            _shutdown_task.cancel()
-        subprocess.run(_cancel_cmd(), check=False)
-        await send_json({"p": "shutdown.state", "state": "cancelled"})
+async def handle_power(ev: dict, send_json) -> None:
+    """锁屏 / 重启 / 关机 / 任务管理器。
+
+    - `lock` / `taskmgr`：立即执行，没有倒计时（做成倒计时反而碍事）；
+    - `shutdown` / `reboot`：默认 30 秒缓冲，期间收到 cancel 立刻中止。
+      这个缓冲是刻意的：远控里误点关机等于把被控机器关在外面。
+    """
+    global _power_task
+    action = str(ev.get("action") or "").strip()
+    if action not in POWER_ACTIONS:
+        await send_json({"p": "agent.error", "err": f"未知电源动作 {action}"})
         return
 
-    delay = int(ev.get("delay", 30))
+    if ev.get("cancel"):
+        if _power_task and not _power_task.done():
+            _power_task.cancel()
+        cmd = security.cancel_cmd()
+        if cmd:
+            subprocess.run(cmd, check=False)
+        await _emit_power(send_json, action, "cancelled")
+        return
+
+    if action == "lock":
+        ok, err = await asyncio.to_thread(security.lock_screen)
+        await _emit_power(send_json, action, "done" if ok else "failed",
+                          **({} if ok else {"err": err}))
+        return
+
+    if action == "taskmgr":
+        ok, err = await asyncio.to_thread(security.task_manager)
+        await _emit_power(send_json, action, "done" if ok else "failed",
+                          **({} if ok else {"err": err}))
+        return
+
+    delay = max(0, min(3600, int(ev.get("delay", 30))))
 
     async def _do() -> None:
         try:
             for remain in range(delay, 0, -1):
-                await send_json({"p": "shutdown.state", "state": "pending", "remain": remain})
+                await _emit_power(send_json, action, "pending", remain=remain)
                 await asyncio.sleep(1)
-            await send_json({"p": "shutdown.state", "state": "executing"})
-            subprocess.run(_shutdown_cmd(0 if SYSTEM != "Windows" else 5), check=False)
+            await _emit_power(send_json, action, "executing")
+            cmd = (security.shutdown_cmd if action == "shutdown" else security.reboot_cmd)
+            # Windows 已经用 /t 让系统自己倒计时，这里直接 0 秒；macOS 走 osascript
+            subprocess.run(cmd(0 if SYSTEM != "Darwin" else delay), check=False)
         except asyncio.CancelledError:
-            await send_json({"p": "shutdown.state", "state": "cancelled"})
+            await _emit_power(send_json, action, "cancelled")
 
-    if _shutdown_task and not _shutdown_task.done():
-        _shutdown_task.cancel()
-    _shutdown_task = asyncio.create_task(_do())
+    if _power_task and not _power_task.done():
+        _power_task.cancel()
+    _power_task = asyncio.create_task(_do())
+
+
+async def handle_shutdown(ev: dict, send_json) -> None:
+    """旧版 `{p:'shutdown'}` 兼容入口。"""
+    await handle_power({**ev, "action": "shutdown"}, send_json)
 
 
 # ---------------------------------------------------------------- 主循环
@@ -404,6 +491,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
 
     inject, (sw, sh), release_all = _init_input()
     screens = list_screens()
+    max_fps = probe_capture_fps()
     cur_screen = 0
     if screens:  # hello.screen 用真实主屏尺寸（pyautogui.size 在多屏下不一定准）
         sw, sh = screens[0]["w"], screens[0]["h"]
@@ -422,6 +510,21 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
     async with websockets.connect(ws_url, **ws_kw) as ws:
         streaming = asyncio.Event()
         streaming.set()  # 默认推流；控制页可发 pause/resume
+
+        # 本会话是否有控制端真的进来过。autoLock 只在「有人连过」时触发，
+        # 否则被控端每次网络抖动重连都会把自己锁上
+        peer_seen = False
+
+        async def _privacy_watch() -> None:
+            """熄屏档的心跳：旁人碰一下键鼠屏幕就会亮，这里压回去。"""
+            while True:
+                await asyncio.sleep(3)
+                try:
+                    await asyncio.to_thread(security.keep_display_off)
+                except Exception:
+                    pass
+
+        privacy_task = asyncio.create_task(_privacy_watch())
 
         async def send_json(obj: dict) -> None:
             mark_activity()
@@ -450,7 +553,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 rtc = WebRTCMedia(
                     send_json=send_json,
                     width=args.width,
-                    fps=min(30, args.fps),
+                    fps=min(144, args.fps),
                     bitrate_kbps=args.bitrate,
                     on_state=_on_rtc_state,
                     audio=not args.no_audio,
@@ -481,7 +584,18 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             await send_json({"p": "agent.hello", "name": args.name, "os": SYSTEM,
                              "screen": scr, "media": media_kind,
                              "audio": audio_ok, "screens": len(screens),
-                             "stream": dict(stream_cfg)})
+                             "stream": dict(stream_cfg),
+                             # v0.2.1：连接信息面板需要的三项（老控制端忽略即可）
+                             "version": AGENT_VERSION,
+                             "ip": _local_ip(),
+                             "capture": "mss" if SYSTEM != "Darwin" else "mss（screencapture 兜底）",
+                             "max_fps": max_fps,
+                             # v0.2.2：安全/电源能力面。控制端据此置灰不支持的项，
+                             # 不靠猜测（官方同一套做法：「当前被控端不支持」）
+                             "auto_lock": SECURITY_CFG["auto_lock"],
+                             "power": security.capabilities(),
+                             "privacy": security.privacy_state()["mode"],
+                             "privacy_engine": security.PRIVACY_ENGINE})
             if screens:
                 await send_json({"p": "screens", "current": cur_screen, "list": screens})
             else:
@@ -495,7 +609,8 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
         await send_hello()
 
         async def rx() -> None:
-            nonlocal cur_screen
+            global MUTED_BY_REMOTE
+            nonlocal cur_screen, peer_seen
             async for raw in ws:
                 if isinstance(raw, bytes):
                     continue  # Agent 不消费对端二进制
@@ -503,6 +618,7 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                 p = ev.get("p", "")
                 if p == "peer.join":
                     # 新控制端进房：重发 hello（对方可能错过首次广播）+ 能力声明
+                    peer_seen = True
                     await send_hello()
                     continue
                 try:
@@ -545,25 +661,61 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                         if ev.get("enable"):
                             release_all()
                     elif p == "shutdown":
+                        # 旧协议入口（H5 控制页在用），内部转成 power action=shutdown
                         await handle_shutdown(ev, send_json)
+                    elif p == "power":
+                        await handle_power(ev, send_json)
+                    elif p == "privacy":
+                        # 起遮罩窗要 100–400ms，放线程里别卡住信令收包
+                        st = await asyncio.to_thread(
+                            security.set_privacy,
+                            str(ev.get("mode") or "off"),
+                            str(ev.get("image") or ""),
+                            str(ev.get("hint") or ""))
+                        await send_json({"p": "privacy.state", **st})
+                    elif p == "security.config":
+                        if "auto_lock" in ev:
+                            SECURITY_CFG["auto_lock"] = bool(ev.get("auto_lock"))
+                            security.save_cfg(SECURITY_CFG)
+                        if "mute" in ev:
+                            on = bool(ev.get("mute"))
+                            ok, muted, err = await asyncio.to_thread(security.set_mute, on)
+                            if ok:
+                                MUTED_BY_REMOTE = muted
+                            await send_json({"p": "security.state",
+                                             "auto_lock": SECURITY_CFG["auto_lock"],
+                                             "mute": muted, "mute_ok": ok,
+                                             **({} if ok else {"err": err})})
+                        else:
+                            await send_json({"p": "security.state",
+                                             "auto_lock": SECURITY_CFG["auto_lock"],
+                                             "mute": MUTED_BY_REMOTE,
+                                             "privacy": security.privacy_state()["mode"]})
                     elif p == "stream.pause":
                         streaming.clear()
                     elif p == "stream.resume":
                         streaming.set()
                     elif p == "stream.config":
                         if ev.get("fps"):
-                            stream_cfg["fps"] = max(1, min(30, int(ev["fps"])))
+                            # 上限 144（官方 FrameLimit 最高档）；JPEG 通路实际到不了，
+                            # 由采集循环的 sleep 自然限速，不在这里二次钳制
+                            stream_cfg["fps"] = max(1, min(144, int(ev["fps"])))
                         if ev.get("quality"):
                             stream_cfg["quality"] = max(30, min(90, int(ev["quality"])))
-                        if ev.get("width"):
-                            stream_cfg["width"] = max(640, min(3840, int(ev["width"])))
+                        if "width" in ev:
+                            # 0 = 原画不缩放；正数钳 640..3840
+                            v = int(ev.get("width") or 0)
+                            stream_cfg["width"] = 0 if v <= 0 else max(640, min(3840, v))
                         if rtc:
                             rtc.set_config(width=ev.get("width"), fps=ev.get("fps"),
                                            bitrate_kbps=ev.get("bitrate"))
-                        await send_json({"p": "stream.config.ack", **stream_cfg,
-                                         "media": media_kind,
-                                         "audio": audio_ok,
-                                         "bitrate": rtc.bitrate_bps // 1000 if rtc else 0})
+                        ack = {"p": "stream.config.ack", **stream_cfg,
+                               "media": media_kind, "audio": audio_ok}
+                        # JPEG 通路没有"码率"概念，字段直接不发；控制端据此不显示
+                        # 「0kbps」这种误导值（协议 §4 允许缺省）
+                        if rtc:
+                            ack["bitrate"] = rtc.bitrate_bps // 1000
+                        await send_json(ack)
                     elif p == "ping":
                         await send_json({"p": "pong", "ts": ev.get("ts")})
                 except Exception as e:  # 单事件失败不断链
@@ -636,7 +788,8 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
                                     slow[0] = 0
                                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
                             w = stream_cfg["width"]
-                            if img.width > w:
+                            # w == 0 = 原画不缩放（与 WebRTC 通路语义一致）
+                            if w > 0 and img.width > w:
                                 img = img.resize((w, max(2, int(img.height * w / img.width))),
                                                  Image.BILINEAR)
                             # 画面没变则不重复编码（省带宽）；但每 2s 保活一帧
@@ -707,6 +860,25 @@ async def run(args: argparse.Namespace, reuse_device: str | None = None) -> None
             # 断链必须松开所有修饰键 + 停剪贴板轮询，否则重连后远端卡 Shift
             release_all()
             await clips.stop()
+            privacy_task.cancel()
+            # 倒计时中若断链，撤销而不是继续执行：断线时执行关机最容易变成「人不在机器前」
+            if _power_task and not _power_task.done():
+                _power_task.cancel()
+            # 撤遮罩、恢复音量：断线后留一块黑屏 / 一个静音会让人以为机器坏了
+            try:
+                await asyncio.to_thread(security.reset_on_disconnect)
+                if MUTED_BY_REMOTE:
+                    await asyncio.to_thread(security.set_mute, False)
+            except Exception as e:  # noqa: BLE001
+                print(f"[agent] 收尾失败：{e}", flush=True)
+            # 结束远程自动锁屏（官方 autoLock）：只在本会话真的有人连过时才锁，
+            # 否则每天几十次重连会把用户反复踢回登录界面
+            if peer_seen and SECURITY_CFG.get("auto_lock"):
+                try:
+                    await asyncio.to_thread(security.lock_screen)
+                    print("[agent] 会话结束，已按 autoLock 锁屏", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[agent] 自动锁屏失败：{e}", flush=True)
             if rtc:
                 await rtc.close()  # 断链时释放 PC，避免重连后重复协商
 

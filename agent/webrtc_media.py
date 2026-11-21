@@ -75,8 +75,10 @@ class ScreenTrack(VideoStreamTrack):
                  on_error: Optional[Callable[[str], None]] = None,
                  log: Optional[Callable[[str], None]] = None) -> None:
         super().__init__()
-        self.max_width = max(640, int(width))
-        self.fps = max(1, min(60, int(fps)))
+        # max_width = 0 表示**不缩放**（官方「原画」档）：按屏原生分辨率编码。
+        # 上限 7680 防呆，避免误传巨大值把 H.264 编码器撑爆。
+        self.max_width = max(0, min(7680, int(width)))
+        self.fps = max(1, min(144, int(fps)))
         self.monitor = max(0, int(monitor))
         self._tls = threading.local()
         self._log = log or (lambda m: print(m, flush=True))
@@ -171,7 +173,7 @@ class ScreenTrack(VideoStreamTrack):
                 img = self._grab_pil()
             else:
                 raise
-        if img.width > self.max_width:
+        if self.max_width > 0 and img.width > self.max_width:
             h = max(2, int(img.height * self.max_width / img.width / 2) * 2)  # 偶数高度，H.264 要求
             img = img.resize((self.max_width, h), Image.BILINEAR)
         if img.width % 2 or img.height % 2:  # yuv420p 需要偶数宽高
@@ -247,7 +249,7 @@ class ScreenTrack(VideoStreamTrack):
         w, h = 640, 360
         if self.monitor < len(mons):
             m = mons[self.monitor]
-            w = min(self.max_width, m["width"])
+            w = m["width"] if self.max_width <= 0 else min(self.max_width, m["width"])
             h = max(2, int(m["height"] * w / m["width"] / 2) * 2)
         key = (w - w % 2, h)
         if getattr(self, "_blank_key", None) != key:  # stream.config 改了宽度要跟着重建
@@ -633,10 +635,12 @@ class WebRTCMedia:
 
     def set_config(self, width: Optional[int] = None, fps: Optional[int] = None,
                    bitrate_kbps: Optional[int] = None) -> None:
-        if width:
-            self.width = max(640, min(3840, int(width)))
+        if width is not None:
+            # 0 = 原画不缩放；其余钳到 640..3840（4K 上限，再高没意义）
+            v = int(width)
+            self.width = 0 if v <= 0 else max(640, min(3840, v))
         if fps:
-            self.fps = max(1, min(60, int(fps)))
+            self.fps = max(1, min(144, int(fps)))
         if bitrate_kbps:
             self.bitrate_bps = max(1000, int(bitrate_kbps)) * 1000
         for sess in self._peers.values():

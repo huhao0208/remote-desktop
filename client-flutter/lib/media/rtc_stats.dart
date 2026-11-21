@@ -83,3 +83,213 @@ int? _jitterDelayMs(Map<dynamic, dynamic> values) {
 }
 
 String _num(Object? value) => rtpInt(value)?.toString() ?? '-';
+
+// ---------------------------------------------------------------------------
+// 连接信息面板（docs/远控复刻基线.md P0-2）
+// ---------------------------------------------------------------------------
+
+/// 一份「面板用」的快照：把整份 `getStats()` 里散落在
+/// `inbound-rtp` / `candidate-pair` / `local-candidate` / `codec` 四类对象
+/// 上的字段合成一个结构。
+///
+/// 为什么不在 [TransportStats] 里直接解析：面板要的是「这一秒这一条链路」，
+/// 需要跨对象 join（候选对 ↔ 本地候选 ↔ 编解码器），而 HUD 只要 fps/分辨率。
+/// 两者混在一起会让 HUD 的单测依赖整份报告。
+class StatsSnapshot {
+  const StatsSnapshot({
+    this.fps,
+    this.width = 0,
+    this.height = 0,
+    this.framesDecoded,
+    this.framesDropped,
+    this.jitterMs,
+    this.jitterBufferMs,
+    this.lossPercent,
+    this.kbps,
+    this.rttMs,
+    this.codec,
+    this.iceType,
+  });
+
+  final int? fps;
+  final int width;
+  final int height;
+  final int? framesDecoded;
+  final int? framesDropped;
+  final int? jitterMs;
+  final int? jitterBufferMs;
+
+  /// 0–100；没有 `packetsReceived` 时为 `null`（不是 0）。
+  final double? lossPercent;
+
+  /// 接收码率 kbps（按 `bytesReceived` 增量折算）；首拍没有基线时为 `null`。
+  final int? kbps;
+  final int? rttMs;
+
+  /// `H.264` / `VP8` …；`video/H264` 这类 mime 会规整成短名。
+  final String? codec;
+
+  /// `host` / `srflx` / `prflx` / `relay`。
+  final String? iceType;
+
+  TransportStats toTransportStats() => TransportStats(
+        fps: fps,
+        width: width,
+        height: height,
+        rttMs: rttMs,
+        bitrateKbps: kbps,
+        lossPercent: lossPercent,
+        jitterMs: jitterMs,
+        jitterBufferMs: jitterBufferMs,
+        dropped: framesDropped,
+        codec: codec,
+        iceType: iceType,
+      );
+}
+
+/// `getStats()` 报告 → [StatsSnapshot]。
+///
+/// [reports] 每项形如 `{"id": "...", "type": "inbound-rtp", "kind": "video", ...}`，
+/// 即把 `StatsReport.id/type/values` 摊平后的 Map。纯函数，可直接单测。
+///
+/// 所有字段**缺就返回 null**，绝不用 0 冒充——面板上「—」表示拿不到，
+/// 「0 ms」表示真的测得 0，两者排障含义完全不同。
+StatsSnapshot parseStatsSnapshot(
+  List<Map<String, dynamic>> reports, {
+  int lastFrames = 0,
+  int lastBytes = 0,
+  DateTime? lastAt,
+  DateTime? now,
+}) {
+  Map<String, dynamic>? inbound;
+  Map<String, dynamic>? transport;
+  final Map<String, Map<String, dynamic>> pairs = <String, Map<String, dynamic>>{};
+  final Map<String, Map<String, dynamic>> candidates = <String, Map<String, dynamic>>{};
+  final Map<String, Map<String, dynamic>> codecs = <String, Map<String, dynamic>>{};
+
+  for (final Map<String, dynamic> r in reports) {
+    final String type = (r['type'] ?? '').toString();
+    final String id = (r['id'] ?? '').toString();
+    switch (type) {
+      case 'inbound-rtp':
+        final String kind = (r['kind'] ?? r['mediaType'] ?? '').toString();
+        if (kind == 'video' && inbound == null) inbound = r;
+      case 'transport':
+        transport ??= r;
+      case 'candidate-pair':
+        pairs[id] = r;
+      case 'local-candidate':
+      case 'remote-candidate':
+        candidates[id] = r;
+      case 'codec':
+        codecs[id] = r;
+    }
+  }
+
+  if (inbound == null) return const StatsSnapshot();
+
+  final int width = rtpInt(inbound['frameWidth']) ?? 0;
+  final int height = rtpInt(inbound['frameHeight']) ?? 0;
+  final int? frames = rtpInt(inbound['framesDecoded']) ?? rtpInt(inbound['framesReceived']);
+
+  int? fps = rtpInt(inbound['framesPerSecond']);
+  if (fps == null || fps <= 0) {
+    fps = null;
+    if (frames != null && frames > 0 && lastAt != null && now != null) {
+      final double seconds = now.difference(lastAt).inMilliseconds / 1000.0;
+      if (seconds > 0.1) {
+        final int delta = frames - lastFrames;
+        if (delta >= 0) fps = (delta / seconds).round();
+      }
+    }
+  }
+
+  // 丢包率：packetsLost 可能是负数（重复包），钳到 0
+  final int? received = rtpInt(inbound['packetsReceived']);
+  final int? lost = rtpInt(inbound['packetsLost']);
+  double? lossPercent;
+  if (received != null && lost != null) {
+    final int total = received + (lost > 0 ? lost : 0);
+    if (total > 0) lossPercent = (lost > 0 ? lost : 0) * 100.0 / total;
+  }
+
+  // 抖动：inbound-rtp.jitter 单位是秒
+  final num? jitterSec = inbound['jitter'] is num ? inbound['jitter'] as num : null;
+  final int? jitterMs = jitterSec == null ? null : (jitterSec * 1000).round();
+
+  // 抖动缓冲深度
+  int? jitterBufferMs;
+  final num? jbDelay =
+      inbound['jitterBufferDelay'] is num ? inbound['jitterBufferDelay'] as num : null;
+  final num? jbEmitted =
+      inbound['jitterBufferEmittedCount'] is num ? inbound['jitterBufferEmittedCount'] as num : null;
+  if (jbDelay != null && jbEmitted != null && jbEmitted > 0) {
+    jitterBufferMs = (jbDelay / jbEmitted * 1000).round();
+  }
+
+  // 码率：字节增量 / 秒
+  int? kbps;
+  final int? bytes = rtpInt(inbound['bytesReceived']);
+  if (bytes != null && lastAt != null && now != null && lastBytes > 0) {
+    final double seconds = now.difference(lastAt).inMilliseconds / 1000.0;
+    final int delta = bytes - lastBytes;
+    if (seconds > 0.1 && delta >= 0) kbps = (delta * 8 / seconds / 1000).round();
+  }
+
+  // 编码格式
+  String? codec;
+  final String codecId = (inbound['codecId'] ?? '').toString();
+  final Map<String, dynamic>? codecReport = codecs[codecId];
+  final String mime =
+      (codecReport?['mimeType'] ?? codecReport?['codec'] ?? '').toString();
+  if (mime.isNotEmpty) {
+    final String short = mime.split('/').last.toUpperCase();
+    codec = short == 'H264' ? 'H.264' : (short == 'H265' ? 'H.265' : short);
+  }
+
+  // 选中的候选对 → 对端候选类型 → iceType
+  String? iceType;
+  String? pairId = (transport?['selectedCandidatePairId'] ?? '').toString();
+  if (pairId.isEmpty) {
+    // 部分实现不给 transport.selectedCandidatePairId，退回「nominated / succeeded」
+    for (final MapEntry<String, Map<String, dynamic>> e in pairs.entries) {
+      final bool nominated = e.value['nominated'] == true;
+      final String state = (e.value['state'] ?? '').toString();
+      if (nominated || state == 'succeeded') {
+        pairId = e.key;
+        break;
+      }
+    }
+  }
+  final Map<String, dynamic>? pair = pairs[pairId];
+  if (pair != null) {
+    final String remoteId = (pair['remoteCandidateId'] ?? '').toString();
+    final String localId = (pair['localCandidateId'] ?? '').toString();
+    final Map<String, dynamic>? remote = candidates[remoteId];
+    final Map<String, dynamic>? local = candidates[localId];
+    final String type =
+        (remote?['candidateType'] ?? local?['candidateType'] ?? '').toString();
+    if (type.isNotEmpty) iceType = type;
+  }
+
+  // RTT：currentRoundTripTime 单位是秒
+  int? rttMs;
+  final num? rttSec =
+      pair?['currentRoundTripTime'] is num ? pair!['currentRoundTripTime'] as num : null;
+  if (rttSec != null) rttMs = (rttSec * 1000).round();
+
+  return StatsSnapshot(
+    fps: fps,
+    width: width,
+    height: height,
+    framesDecoded: frames,
+    framesDropped: rtpInt(inbound['framesDropped']),
+    jitterMs: jitterMs,
+    jitterBufferMs: jitterBufferMs,
+    lossPercent: lossPercent,
+    kbps: kbps,
+    rttMs: rttMs,
+    codec: codec,
+    iceType: iceType,
+  );
+}
