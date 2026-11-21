@@ -182,10 +182,25 @@ def _init_input():
     按住（远端按 Shift 多选、Ctrl+滚轮都靠这个）；其它键一律原子按下+抬起。
     `release_all` 用于 WS 断开/失焦，避免远端卡住 Shift。
     """
-    import pyautogui
-    pyautogui.FAILSAFE = False
-    pyautogui.PAUSE = 0
-    sw, sh = pyautogui.size()
+    try:
+        import pyautogui
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0
+        sw, sh = pyautogui.size()
+    except Exception as e:
+        # 无 X/无显示器（无头 Linux、SSH 会话）时 pyautogui/mouseinfo 连不上显示：
+        # 输入不可用，但信令/文件传输/剪贴板仍要能用——hello 走 screens=[] 的
+        # screen_permission 降级，而不是在这里抛异常卡进「断链重连」死循环。
+        print(f"[agent] 输入后端不可用（{e}），键鼠注入降级为 no-op",
+              file=sys.stderr, flush=True)
+
+        def inject(ev) -> None:  # noqa: ARG001  事件格式见 run() 里的分发
+            pass
+
+        def release_all() -> None:
+            pass
+
+        return inject, (0, 0), release_all
     pressed: set[str] = set()  # 当前被按住的修饰键（pyautogui 键名）
 
     def _hold(mods) -> list[str]:

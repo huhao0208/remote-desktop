@@ -109,7 +109,7 @@ flutter run -d macos
 | 4 | 「外设」面板 | 显示「同平台/键位直通」置灰 | isCrossPlatform 只认 mac↔win |
 | 5 | 传一个 100MB 文件过去 | 秒传 + sha256 一致 + 无 `.part` 残留 | 文件传输全链路 |
 | 6 | 传同名文件第二次 | 落成 `a (1).zip` | 冲突改名 |
-| 7 | 从 Linux 下载 `/etc/hosts` 回来 | 成功；但下载 `/etc/shadow` | **被拒**（路径白名单） |
+| 7 | 从 Linux 下载白名单内文件（如刚上传的文件） | 成功 + sha256 一致；下载 `/etc/shadow`、`/etc/hosts` | **被拒**（协议 §2-8：浏览范围=接收目录+主目录，系统目录一律拒绝） |
 | 8 | 开语音 | Mac 上说句话、虚拟机扬声器出声 | audio_playback + gate |
 | 9 | 关语音再开，连续开关 5 次 | �次都有 `mic.state` 回执、无卡死 | 状态机 + 零重协商 |
 | 10 | `Ctrl+Alt+Del` 按钮 | 无效但不出错（Linux 无此组合） | 降级路径 |
@@ -125,3 +125,18 @@ flutter run -d macos
 | WebRTC 协商失败回落 JPEG | 桥接没开 / 防火墙拦 UDP | 虚拟机网络改桥接；`sudo ufw disable` 试跑 |
 | 传输慢 | base64 走信令 WS 本来就不快（~2MB/s） | 正常，4GiB 上限测试换小文件分批传 |
 | TURN 报错 | 内网调试用不到 TURN | 忽略，P2P 直连成功即可 |
+
+### 5.1 2026-11-21 NAS 真机验证结果
+
+11 条全部验证（协议层自动化，工具 `tools/e2e_bstage_linux.py`，正式轮 100MB
+**15/15 PASS**；详细证据链见 `docs/nas-debug-handoff.md` §6/§7）：
+
+- 通过：#1（1920×1080 JPEG 帧流 + 色块内容比对）、#2（move(0.75,0.25) → 指针 (1440,270)）、
+  #3/#4（hello.cursor=unsupported / hello.os=Linux 契约达成）、#5（sha256 一致 + 无 .part）、
+  #6（rename "(1)"）、#7（白名单内成功 + 系统目录 denied）、#8/#9（mic 降级回执 5/5）、
+  #10（combo 无 error）、#11（断链自动回原房间）。
+- 遗留人工项：#3/#4 Flutter 面板 UI 走查（置灰逻辑已有单测覆盖）、#8 真实音频轨
+  （NAS 无声卡，需 WebRTC+声卡环境）。
+- 环境注意：agent-venv 需要空壳 tkinter（mouseinfo import 时缺 tkinter 会
+  `sys.exit` 静默杀 agent，见 nas-debug-handoff.md §5-9）；Agent 已支持无 X 降级
+  （screens=0 + `agent.error: screen_permission`，信令/文件传输仍可用）。
